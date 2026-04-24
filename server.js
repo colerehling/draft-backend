@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 require('dotenv').config();
 const { Pool } = require('pg');
 
@@ -17,10 +18,12 @@ const pgPool = new Pool({
 app.use(cors());
 app.use(express.json());
 
+// Serve static files from current directory
+app.use(express.static(__dirname));
+
 // Get all available categories dynamically from draft_choices table
 app.get('/api/categories', async (req, res) => {
     try {
-        // Get all table names from draft_choices
         const result = await pgPool.query(`
             SELECT table_name, number_of_items 
             FROM draft_choices 
@@ -43,7 +46,6 @@ app.get('/api/categories', async (req, res) => {
 app.get('/api/items/:category/with-scores', async (req, res) => {
     const { category } = req.params;
     
-    // Validate that the table exists in draft_choices
     const tableCheck = await pgPool.query(
         'SELECT table_name FROM draft_choices WHERE table_name = $1',
         [category]
@@ -110,17 +112,21 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
+// Serve the main page
 app.get('/', (req, res) => {
-    res.json({
-        name: 'Draft Game API',
-        version: '3.0.0',
-        endpoints: {
-            categories: 'GET /api/categories',
-            items_with_scores: 'GET /api/items/:category/with-scores',
-            category_stats: 'GET /api/categories/:category/stats',
-            health: 'GET /api/health'
-        }
-    });
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+app.get('/index.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
+app.get('/draft.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'draft.html'));
+});
+
+app.get('/results.html', (req, res) => {
+    res.sendFile(path.join(__dirname, 'results.html'));
 });
 
 app.listen(PORT, () => {
@@ -130,6 +136,7 @@ app.listen(PORT, () => {
     console.log(`   GET /api/items/:category/with-scores`);
     console.log(`   GET /api/categories/:category/stats`);
     console.log(`   GET /api/health\n`);
+    console.log(`🌐 Open your browser and go to: http://localhost:${PORT}\n`);
 });
 
 process.on('SIGINT', async () => {
