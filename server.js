@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const path = require('path');
 require('dotenv').config();
 const { Pool } = require('pg');
 
@@ -17,9 +16,6 @@ const pgPool = new Pool({
 
 app.use(cors());
 app.use(express.json());
-
-// Serve static files from current directory
-app.use(express.static(__dirname));
 
 // Get all available categories dynamically from draft_choices table
 app.get('/api/categories', async (req, res) => {
@@ -46,16 +42,17 @@ app.get('/api/categories', async (req, res) => {
 app.get('/api/items/:category/with-scores', async (req, res) => {
     const { category } = req.params;
     
-    const tableCheck = await pgPool.query(
-        'SELECT table_name FROM draft_choices WHERE table_name = $1',
-        [category]
-    );
-    
-    if (tableCheck.rows.length === 0) {
-        return res.status(400).json({ success: false, error: 'Invalid category' });
-    }
-    
     try {
+        // Check if category exists
+        const tableCheck = await pgPool.query(
+            'SELECT table_name FROM draft_choices WHERE table_name = $1',
+            [category]
+        );
+        
+        if (tableCheck.rows.length === 0) {
+            return res.status(400).json({ success: false, error: 'Invalid category' });
+        }
+        
         const result = await pgPool.query(
             `SELECT item_name, score FROM ${category} ORDER BY item_name`
         );
@@ -80,8 +77,8 @@ app.get('/api/categories/:category/stats', async (req, res) => {
             res.json({
                 success: true,
                 stats: {
-                    totalItems: result.rows[0].number_of_items,
-                    totalScore: result.rows[0].total_score_value,
+                    totalItems: parseInt(result.rows[0].number_of_items),
+                    totalScore: parseFloat(result.rows[0].total_score_value),
                     averageScore: parseFloat(result.rows[0].average_score)
                 }
             });
@@ -112,31 +109,31 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
-// Serve the main page
+// Root endpoint - API information (no HTML serving)
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
+    res.json({
+        name: 'Draft Game API',
+        version: '2.0.0',
+        status: 'running',
+        endpoints: {
+            categories: 'GET /api/categories',
+            itemsWithScores: 'GET /api/items/:category/with-scores',
+            categoryStats: 'GET /api/categories/:category/stats',
+            health: 'GET /api/health'
+        },
+        documentation: 'Frontend available at your Vercel URL'
+    });
 });
 
-app.get('/index.html', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-app.get('/draft.html', (req, res) => {
-    res.sendFile(path.join(__dirname, 'draft.html'));
-});
-
-app.get('/results.html', (req, res) => {
-    res.sendFile(path.join(__dirname, 'results.html'));
-});
-
-app.listen(PORT, () => {
-    console.log(`\n🚀 Server running on http://localhost:${PORT}`);
-    console.log(`\n📋 API endpoints ready`);
-    console.log(`   GET /api/categories - Dynamically from draft_choices table`);
-    console.log(`   GET /api/items/:category/with-scores`);
-    console.log(`   GET /api/categories/:category/stats`);
-    console.log(`   GET /api/health\n`);
-    console.log(`🌐 Open your browser and go to: http://localhost:${PORT}\n`);
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`\n🚀 Server running on port ${PORT}`);
+    console.log(`\n📋 API endpoints ready:`);
+    console.log(`   GET /api/categories - Get all categories`);
+    console.log(`   GET /api/items/:category/with-scores - Get items with scores`);
+    console.log(`   GET /api/categories/:category/stats - Get category statistics`);
+    console.log(`   GET /api/health - Health check`);
+    console.log(`\n✅ Ready to accept API requests\n`);
 });
 
 process.on('SIGINT', async () => {
