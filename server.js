@@ -23,8 +23,11 @@ app.get('/api/categories', async (req, res) => {
         const result = await pgPool.query(`
             SELECT table_name, number_of_items 
             FROM draft_choices 
+            WHERE live = 'yes'
             ORDER BY table_name
         `);
+        
+        console.log('Categories returned:', result.rows); // Add this debug line
         
         const categories = result.rows.map(row => ({
             table_name: row.table_name,
