@@ -9,7 +9,7 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// ✅ Initialize Socket.IO with proper CORS
+// Initialize Socket.IO with proper CORS
 const io = socketIo(server, {
     cors: {
         origin: [
@@ -36,7 +36,7 @@ const pgPool = new Pool({
     }
 });
 
-// ✅ CORS for Express routes
+// CORS for Express routes
 app.use(cors({
     origin: [
         'https://draftanything.vercel.app',
@@ -81,6 +81,8 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
     const { category } = req.params;
     
     try {
+        console.log(`Fetching items for category: ${category}`);
+        
         const tableCheck = await pgPool.query(
             'SELECT table_name FROM draft_choices WHERE table_name = $1',
             [category]
@@ -90,9 +92,13 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Invalid category' });
         }
         
+        // Use parameterized query with identifier - IMPORTANT: sanitize the table name
+        const safeCategory = category.replace(/[^a-z_]/gi, '');
         const result = await pgPool.query(
-            `SELECT item_name, score FROM "${category}" ORDER BY item_name`
+            `SELECT item_name, score FROM "${safeCategory}" ORDER BY item_name`
         );
+        
+        console.log(`Found ${result.rows.length} items in ${category}`);
         res.json({ success: true, items: result.rows, category: category });
     } catch (error) {
         console.error('Error fetching items with scores:', error);
@@ -138,6 +144,8 @@ io.on('connection', (socket) => {
 
     // Create a new game room
     socket.on('createGame', (gameConfig, callback) => {
+        console.log('Creating game with config:', gameConfig);
+        
         const roomCode = generateRoomCode();
         const gameRoom = {
             roomCode: roomCode,
@@ -145,7 +153,7 @@ io.on('connection', (socket) => {
             players: [{
                 id: socket.id,
                 name: gameConfig.playerName || 'Host',
-                isReady: true  // ✅ Host starts ready
+                isReady: true
             }],
             config: gameConfig,
             gameState: 'waiting',
@@ -157,6 +165,8 @@ io.on('connection', (socket) => {
         socket.join(roomCode);
         
         console.log(`🎮 Game created: ${roomCode} by ${socket.id}`);
+        console.log(`Category in config: ${gameConfig.category}`);
+        
         if (callback) callback({ success: true, roomCode: roomCode });
         io.to(roomCode).emit('playerJoined', gameRoom.players);
         io.to(roomCode).emit('hostReady', true);
@@ -211,7 +221,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // ✅ START DRAFT - Now properly inside the io.on('connection') block
+    // Start the draft
     socket.on('startDraft', async (roomCode) => {
         console.log(`🎯 Start draft requested for room: ${roomCode} by ${socket.id}`);
         
@@ -235,13 +245,25 @@ io.on('connection', (socket) => {
             return;
         }
         
+        // Get the category from config
+        const category = gameRoom.config.category;
+        console.log(`Loading items for category: ${category}`);
+        
+        if (!category) {
+            socket.emit('startDraftError', 'No category selected');
+            return;
+        }
+        
         try {
-            const items = await loadGameItems(gameRoom.config.category);
+            const items = await loadGameItems(category);
             
             if (!items || items.length === 0) {
-                socket.emit('startDraftError', `No items found for category "${gameRoom.config.category}"`);
+                console.error(`No items found for category: ${category}`);
+                socket.emit('startDraftError', `No items found for category "${category}". Please check the database.`);
                 return;
             }
+            
+            console.log(`Loaded ${items.length} items from ${category}`);
             
             const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
             gameRoom.gameState = 'drafting';
@@ -249,8 +271,9 @@ io.on('connection', (socket) => {
             
             io.to(roomCode).emit('draftStarted', draftState);
             console.log(`✅ Draft started for room ${roomCode}`);
+            
         } catch (error) {
-            console.error('Error loading items:', error);
+            console.error('Error loading items for draft:', error);
             socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
         }
     });
@@ -289,7 +312,9 @@ io.on('connection', (socket) => {
             return;
         }
         
-        const score = draft.itemsWithScores.find(i => i.item_name === itemName)?.score || 0;
+        const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
+        const score = scoreItem ? scoreItem.score : 0;
+        
         draft.availableItems.splice(itemIndex, 1);
         draft.playersItems[currentPick.playerIndex].push({ name: itemName, score: score });
         
@@ -350,14 +375,43 @@ function generateRoomCode() {
 }
 
 async function loadGameItems(category) {
+    console.log(`loadGameItems called with category: ${category}`);
+    
+    if (!category) {
+        throw new Error('Category is required');
+    }
+    
+    // Sanitize the category name to prevent SQL injection
+    const safeCategory = category.replace(/[^a-z_]/gi, '');
+    console.log(`Safe category name: ${safeCategory}`);
+    
+    // First, check if the table exists
+    const tableCheck = await pgPool.query(`
+        SELECT EXISTS (
+            SELECT FROM information_schema.tables 
+            WHERE table_name = $1
+        )
+    `, [safeCategory]);
+    
+    if (!tableCheck.rows[0].exists) {
+        throw new Error(`Table "${safeCategory}" does not exist`);
+    }
+    
+    // Then fetch items
     const result = await pgPool.query(
-        `SELECT item_name, score FROM "${category}" ORDER BY item_name`
+        `SELECT item_name, score FROM "${safeCategory}" ORDER BY item_name`
     );
+    
+    console.log(`Found ${result.rows.length} items in ${safeCategory}`);
     return result.rows;
 }
 
 function initializeDraftState(players, config, items) {
+    console.log(`Initializing draft state with ${items.length} items for ${players.length} players`);
+    console.log(`Config category: ${config.category}`);
+    
     const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
+    
     return {
         players: players.map(p => ({ id: p.id, name: p.name })),
         availableItems: items.map(i => i.item_name),
@@ -369,7 +423,7 @@ function initializeDraftState(players, config, items) {
         numRounds: config.numRounds,
         timerSeconds: config.timerMinutes * 60,
         category: config.category,
-        categoryName: config.categoryName
+        categoryName: config.categoryName || config.category
     };
 }
 
@@ -414,4 +468,4 @@ process.on('SIGINT', async () => {
     process.exit(0);
 });
 
-module.exports = pgPool;module.exports = pgPool;
+module.exports = pgPool;
