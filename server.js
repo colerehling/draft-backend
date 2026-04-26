@@ -139,31 +139,31 @@ io.on('connection', (socket) => {
     console.log('New client connected:', socket.id);
 
     // Create a new game room
-    socket.on('createGame', (gameConfig, callback) => {
-        const roomCode = generateRoomCode();
-        const gameRoom = {
-            roomCode: roomCode,
-            host: socket.id,
-            players: [{
-                id: socket.id,
-                name: gameConfig.playerName || 'Host',
-                isReady: false
-            }],
-            config: gameConfig,
-            gameState: 'waiting',
-            draftState: null,
-            createdAt: Date.now()
-        };
-        
-        gameRooms.set(roomCode, gameRoom);
-        socket.join(roomCode);
-        
-        console.log(`Game created: ${roomCode} by ${socket.id}`);
-        
-        if (callback) callback({ success: true, roomCode: roomCode });
-        io.to(roomCode).emit('playerJoined', gameRoom.players);
-    });
-
+   socket.on('createGame', (gameConfig, callback) => {
+    const roomCode = generateRoomCode();
+    const gameRoom = {
+        roomCode: roomCode,
+        host: socket.id,
+        players: [{
+            id: socket.id,
+            name: gameConfig.playerName || 'Host',
+            isReady: true  // Host is automatically ready
+        }],
+        config: gameConfig,
+        gameState: 'waiting',
+        draftState: null,
+        createdAt: Date.now()
+    };
+    
+    gameRooms.set(roomCode, gameRoom);
+    socket.join(roomCode);
+    
+    console.log(`Game created: ${roomCode} by ${socket.id}`);
+    
+    if (callback) callback({ success: true, roomCode: roomCode });
+    io.to(roomCode).emit('playerJoined', gameRoom.players);
+    io.to(roomCode).emit('hostReady', true); // New event to notify host is ready
+});
     // Join an existing game
     socket.on('joinGame', (data, callback) => {
         const { roomCode, playerName } = data;
