@@ -294,15 +294,44 @@ function generateRoomCode() {
     return code;
 }
 
+// Replace the loadGameItems function with this:
 async function loadGameItems(category) {
-    const result = await pgPool.query(
-        `SELECT item_name, score FROM ${category} ORDER BY item_name`
-    );
-    return result.rows;
+    try {
+        console.log(`Loading items for category: ${category}`);
+        
+        // First, verify the table exists
+        const tableCheck = await pgPool.query(`
+            SELECT EXISTS (
+                SELECT FROM information_schema.tables 
+                WHERE table_name = $1
+            )
+        `, [category]);
+        
+        if (!tableCheck.rows[0].exists) {
+            console.error(`Table ${category} does not exist`);
+            throw new Error(`Category table "${category}" not found`);
+        }
+        
+        // Then fetch items
+        const result = await pgPool.query(
+            `SELECT item_name, score FROM "${category}" ORDER BY item_name`
+        );
+        
+        console.log(`Loaded ${result.rows.length} items from ${category}`);
+        return result.rows;
+    } catch (error) {
+        console.error(`Error loading items from ${category}:`, error.message);
+        throw error;
+    }
 }
 
+// Also update the initializeDraftState function:
 function initializeDraftState(players, config, items) {
+    console.log(`Initializing draft state with ${items.length} items for ${players.length} players`);
+    console.log(`Config:`, config);
+    
     const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
+    
     return {
         players: players.map(p => ({ id: p.id, name: p.name })),
         availableItems: items.map(i => i.item_name),
@@ -318,22 +347,55 @@ function initializeDraftState(players, config, items) {
     };
 }
 
-function generateDraftOrder(numPlayers, numRounds, draftType) {
-    const order = [];
-    for (let round = 1; round <= numRounds; round++) {
-        if (draftType === 'snake' && round % 2 === 0) {
-            for (let i = numPlayers - 1; i >= 0; i--) {
-                order.push({ playerIndex: i, round: round });
-            }
-        } else {
-            for (let i = 0; i < numPlayers; i++) {
-                order.push({ playerIndex: i, round: round });
-            }
-        }
+// Update the startDraft event handler:
+socket.on('startDraft', async (roomCode) => {
+    console.log(`Start draft requested for room: ${roomCode} by ${socket.id}`);
+    
+    const gameRoom = gameRooms.get(roomCode);
+    
+    if (!gameRoom) {
+        socket.emit('startDraftError', 'Game room not found');
+        return;
     }
-    return order;
-}
-
+    
+    if (gameRoom.host !== socket.id) {
+        socket.emit('startDraftError', 'Only the host can start the draft');
+        return;
+    }
+    
+    const allReady = gameRoom.players.every(p => p.isReady === true);
+    const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
+    
+    if (!allReady || !correctCount) {
+        socket.emit('startDraftError', 'Not all players are ready');
+        return;
+    }
+    
+    console.log(`Starting draft for room: ${roomCode}`);
+    console.log(`Category: ${gameRoom.config.category}`);
+    
+    try {
+        const items = await loadGameItems(gameRoom.config.category);
+        
+        if (!items || items.length === 0) {
+            console.error(`No items found for category: ${gameRoom.config.category}`);
+            socket.emit('startDraftError', `No items found for category "${gameRoom.config.category}". Please check the database.`);
+            return;
+        }
+        
+        const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
+        
+        gameRoom.gameState = 'drafting';
+        gameRoom.draftState = draftState;
+        
+        console.log(`Draft state initialized, sending to room: ${roomCode}`);
+        io.to(roomCode).emit('draftStarted', draftState);
+        
+    } catch (error) {
+        console.error('Error loading items for draft:', error);
+        socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
+    }
+});
 // Start server
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 Server running on port ${PORT}`);
