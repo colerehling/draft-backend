@@ -195,7 +195,7 @@ io.on('connection', (socket) => {
         gameRoom.players.push(newPlayer);
         socket.join(roomCode);
         
-        console.log(`👤 Player ${socket.id} joined room ${roomCode}`);
+        console.log(`👤 Player ${socket.id} (${newPlayer.name}) joined room ${roomCode}`);
         if (callback) callback({ success: true, roomCode: roomCode });
         io.to(roomCode).emit('playerJoined', gameRoom.players);
         io.to(roomCode).emit('playerCount', gameRoom.players.length);
@@ -208,12 +208,14 @@ io.on('connection', (socket) => {
             const player = gameRoom.players.find(p => p.id === socket.id);
             if (player) {
                 player.isReady = true;
+                console.log(`✅ Player ${player.name} is ready in room ${roomCode}`);
                 io.to(roomCode).emit('playerReadyUpdate', gameRoom.players);
                 
                 const allReady = gameRoom.players.every(p => p.isReady === true);
                 const fullPlayers = gameRoom.players.length === gameRoom.config.numPlayers;
                 
                 if (allReady && fullPlayers) {
+                    console.log(`🎉 All players ready in room ${roomCode}`);
                     io.to(roomCode).emit('allPlayersReady');
                 }
             }
@@ -296,18 +298,26 @@ io.on('connection', (socket) => {
             console.log(`🔄 Player ${socket.id} rejoined room ${roomCode}`);
             
             if (gameRoom.draftState) {
+                // Send full draft state
                 socket.emit('draftStarted', gameRoom.draftState);
                 
                 // Send current turn info
                 const currentPlayer = gameRoom.draftState.currentPlayer;
                 if (currentPlayer) {
+                    console.log(`📢 Sending turn info to rejoining player: ${currentPlayer.name}`);
                     socket.emit('turnChange', {
                         playerId: currentPlayer.id,
                         playerName: currentPlayer.name,
                         timeRemaining: gameRoom.draftState.timerSeconds
                     });
                 }
+            } else {
+                // If draft hasn't started, send player list
+                socket.emit('playerJoined', gameRoom.players);
             }
+        } else {
+            console.log(`❌ Room ${roomCode} not found for rejoining player`);
+            socket.emit('error', 'Game room not found');
         }
     });
 
@@ -334,7 +344,7 @@ io.on('connection', (socket) => {
         const currentPlayer = draft.players[currentPick.playerIndex];
         
         if (currentPlayer.id !== socket.id) {
-            console.log(`Not your turn! Current player: ${currentPlayer.id}, Your: ${socket.id}`);
+            console.log(`Not your turn! Current player: ${currentPlayer.name} (${currentPlayer.id}), Your: ${socket.id}`);
             socket.emit('pickError', 'Not your turn');
             return;
         }
@@ -355,6 +365,7 @@ io.on('connection', (socket) => {
         // Broadcast pick to all players
         io.to(roomCode).emit('pickMade', {
             playerId: socket.id,
+            playerName: currentPlayer.name,
             item: itemName
         });
         
@@ -363,7 +374,7 @@ io.on('connection', (socket) => {
         
         // Check if draft is complete
         if (draft.currentPickIndex >= draft.draftOrder.length) {
-            console.log('Draft complete!');
+            console.log(`🏁 Draft complete for room ${roomCode}`);
             const results = calculateResults(draft.players, draft.playersItems);
             io.to(roomCode).emit('draftComplete', results);
         } else {
@@ -371,7 +382,7 @@ io.on('connection', (socket) => {
             const nextPick = draft.draftOrder[draft.currentPickIndex];
             draft.currentPlayer = draft.players[nextPick.playerIndex];
             
-            console.log(`Next turn: ${draft.currentPlayer.name} (${draft.currentPlayer.id})`);
+            console.log(`➡️ Next turn: ${draft.currentPlayer.name} (${draft.currentPlayer.id})`);
             
             // Emit turn change to all players
             io.to(roomCode).emit('turnChange', {
@@ -389,9 +400,11 @@ io.on('connection', (socket) => {
         for (const [roomCode, gameRoom] of gameRooms.entries()) {
             const playerIndex = gameRoom.players.findIndex(p => p.id === socket.id);
             if (playerIndex !== -1) {
+                const disconnectedPlayer = gameRoom.players[playerIndex];
                 const wasHost = gameRoom.host === socket.id;
                 gameRoom.players.splice(playerIndex, 1);
                 
+                console.log(`👋 Player ${disconnectedPlayer.name} left room ${roomCode}`);
                 io.to(roomCode).emit('playerLeft', gameRoom.players);
                 
                 if (gameRoom.players.length === 0) {
@@ -399,6 +412,7 @@ io.on('connection', (socket) => {
                     console.log(`🗑️ Room ${roomCode} deleted (empty)`);
                 } else if (wasHost && gameRoom.players.length > 0) {
                     gameRoom.host = gameRoom.players[0].id;
+                    console.log(`👑 New host in room ${roomCode}: ${gameRoom.players[0].name}`);
                     io.to(roomCode).emit('hostChanged', gameRoom.host);
                 }
                 break;
@@ -449,6 +463,7 @@ async function loadGameItems(category) {
 
 function initializeDraftState(players, config, items) {
     console.log(`Initializing draft state with ${items.length} items for ${players.length} players`);
+    console.log(`Players:`, players.map(p => ({ id: p.id, name: p.name })));
     console.log(`Config category: ${config.category}`);
     
     const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
@@ -464,7 +479,8 @@ function initializeDraftState(players, config, items) {
         numRounds: config.numRounds,
         timerSeconds: config.timerMinutes * 60,
         category: config.category,
-        categoryName: config.categoryName || config.category
+        categoryName: config.categoryName || config.category,
+        draftType: config.draftType
     };
 }
 
