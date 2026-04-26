@@ -92,7 +92,6 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
             return res.status(400).json({ success: false, error: 'Invalid category' });
         }
         
-        // Use parameterized query with identifier - IMPORTANT: sanitize the table name
         const safeCategory = category.replace(/[^a-z_]/gi, '');
         const result = await pgPool.query(
             `SELECT item_name, score FROM "${safeCategory}" ORDER BY item_name`
@@ -245,7 +244,6 @@ io.on('connection', (socket) => {
             return;
         }
         
-        // Get the category from config
         const category = gameRoom.config.category;
         console.log(`Loading items for category: ${category}`);
         
@@ -269,7 +267,19 @@ io.on('connection', (socket) => {
             gameRoom.gameState = 'drafting';
             gameRoom.draftState = draftState;
             
+            // Send draft started event to all players
             io.to(roomCode).emit('draftStarted', draftState);
+            
+            // Emit turn change for the first player
+            const firstPlayer = draftState.currentPlayer;
+            console.log(`First player turn: ${firstPlayer.name} (${firstPlayer.id})`);
+            
+            io.to(roomCode).emit('turnChange', {
+                playerId: firstPlayer.id,
+                playerName: firstPlayer.name,
+                timeRemaining: draftState.timerSeconds
+            });
+            
             console.log(`✅ Draft started for room ${roomCode}`);
             
         } catch (error) {
@@ -287,6 +297,16 @@ io.on('connection', (socket) => {
             
             if (gameRoom.draftState) {
                 socket.emit('draftStarted', gameRoom.draftState);
+                
+                // Send current turn info
+                const currentPlayer = gameRoom.draftState.currentPlayer;
+                if (currentPlayer) {
+                    socket.emit('turnChange', {
+                        playerId: currentPlayer.id,
+                        playerName: currentPlayer.name,
+                        timeRemaining: gameRoom.draftState.timerSeconds
+                    });
+                }
             }
         }
     });
@@ -294,14 +314,27 @@ io.on('connection', (socket) => {
     // Make a pick during draft
     socket.on('makePick', (data) => {
         const { roomCode, itemName } = data;
+        console.log(`📦 Pick received: ${itemName} in room ${roomCode} from ${socket.id}`);
+        
         const gameRoom = gameRooms.get(roomCode);
         
-        if (!gameRoom || gameRoom.gameState !== 'drafting') return;
+        if (!gameRoom || gameRoom.gameState !== 'drafting') {
+            socket.emit('pickError', 'Game not in drafting state');
+            return;
+        }
         
         const draft = gameRoom.draftState;
         const currentPick = draft.draftOrder[draft.currentPickIndex];
         
-        if (!currentPick || draft.players[currentPick.playerIndex].id !== socket.id) {
+        if (!currentPick) {
+            socket.emit('pickError', 'No current pick');
+            return;
+        }
+        
+        const currentPlayer = draft.players[currentPick.playerIndex];
+        
+        if (currentPlayer.id !== socket.id) {
+            console.log(`Not your turn! Current player: ${currentPlayer.id}, Your: ${socket.id}`);
             socket.emit('pickError', 'Not your turn');
             return;
         }
@@ -315,21 +348,32 @@ io.on('connection', (socket) => {
         const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
         const score = scoreItem ? scoreItem.score : 0;
         
+        // Remove item and add to player's picks
         draft.availableItems.splice(itemIndex, 1);
         draft.playersItems[currentPick.playerIndex].push({ name: itemName, score: score });
         
+        // Broadcast pick to all players
         io.to(roomCode).emit('pickMade', {
             playerId: socket.id,
             item: itemName
         });
         
+        // Move to next pick
         draft.currentPickIndex++;
         
+        // Check if draft is complete
         if (draft.currentPickIndex >= draft.draftOrder.length) {
-            io.to(roomCode).emit('draftComplete', calculateResults(draft.players, draft.playersItems));
+            console.log('Draft complete!');
+            const results = calculateResults(draft.players, draft.playersItems);
+            io.to(roomCode).emit('draftComplete', results);
         } else {
+            // Get next player
             const nextPick = draft.draftOrder[draft.currentPickIndex];
             draft.currentPlayer = draft.players[nextPick.playerIndex];
+            
+            console.log(`Next turn: ${draft.currentPlayer.name} (${draft.currentPlayer.id})`);
+            
+            // Emit turn change to all players
             io.to(roomCode).emit('turnChange', {
                 playerId: draft.currentPlayer.id,
                 playerName: draft.currentPlayer.name,
@@ -381,11 +425,9 @@ async function loadGameItems(category) {
         throw new Error('Category is required');
     }
     
-    // Sanitize the category name to prevent SQL injection
     const safeCategory = category.replace(/[^a-z_]/gi, '');
     console.log(`Safe category name: ${safeCategory}`);
     
-    // First, check if the table exists
     const tableCheck = await pgPool.query(`
         SELECT EXISTS (
             SELECT FROM information_schema.tables 
@@ -397,7 +439,6 @@ async function loadGameItems(category) {
         throw new Error(`Table "${safeCategory}" does not exist`);
     }
     
-    // Then fetch items
     const result = await pgPool.query(
         `SELECT item_name, score FROM "${safeCategory}" ORDER BY item_name`
     );
