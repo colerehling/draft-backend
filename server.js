@@ -304,37 +304,90 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Re-join room (for draft page)
-    socket.on('joinGameRoom', (roomCode) => {
-        console.log(`🔄 Player ${socket.id} rejoining room ${roomCode}`);
-        const gameRoom = gameRooms.get(roomCode);
+   // Re-join room (for draft page)
+socket.on('joinGameRoom', (roomCode) => {
+    console.log(`🔄 Player ${socket.id} rejoining room ${roomCode}`);
+    const gameRoom = gameRooms.get(roomCode);
+    
+    if (gameRoom) {
+        // Check if this socket is already in the players list
+        const existingPlayerIndex = gameRoom.players.findIndex(p => p.id === socket.id);
+        const wasHost = gameRoom.host === socket.id;
         
-        if (gameRoom) {
-            socket.join(roomCode);
-            console.log(`✅ Player ${socket.id} joined room ${roomCode}`);
+        if (existingPlayerIndex === -1) {
+            // This is a new socket connection for an existing player
+            // Find the player by name or by old ID stored in localStorage?
+            console.log(`⚠️ Player ${socket.id} not found in players list, but rejoining room ${roomCode}`);
             
-            if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
-                console.log(`📢 Sending draft state to rejoining player`);
-                socket.emit('draftStarted', gameRoom.draftState);
+            // For host, update the host ID
+            if (wasHost) {
+                console.log(`👑 Updating host ID from ${gameRoom.host} to ${socket.id}`);
+                gameRoom.host = socket.id;
                 
-                const currentPlayer = gameRoom.draftState.currentPlayer;
-                if (currentPlayer) {
-                    console.log(`📢 Sending turn info to rejoining player: ${currentPlayer.name}`);
-                    socket.emit('turnChange', {
-                        playerId: currentPlayer.id,
-                        playerName: currentPlayer.name,
-                        timeRemaining: gameRoom.draftState.timerSeconds
-                    });
+                // Also update the player in the list
+                const hostPlayerIndex = gameRoom.players.findIndex(p => p.name === 'Host');
+                if (hostPlayerIndex !== -1) {
+                    gameRoom.players[hostPlayerIndex].id = socket.id;
+                    console.log(`✅ Updated host player ID to ${socket.id}`);
                 }
-            } else {
-                console.log(`📢 Sending player list to rejoining player`);
-                socket.emit('playerJoined', gameRoom.players);
+            }
+        }
+        
+        socket.join(roomCode);
+        console.log(`✅ Player ${socket.id} (${socket.id === gameRoom.host ? 'HOST' : 'player'}) joined room ${roomCode}`);
+        
+        if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
+            console.log(`📢 Sending draft state to rejoining player`);
+            socket.emit('draftStarted', gameRoom.draftState);
+            
+            const currentPlayer = gameRoom.draftState.currentPlayer;
+            if (currentPlayer) {
+                console.log(`📢 Sending turn info to rejoining player: ${currentPlayer.name} (${currentPlayer.id})`);
+                socket.emit('turnChange', {
+                    playerId: currentPlayer.id,
+                    playerName: currentPlayer.name,
+                    timeRemaining: gameRoom.draftState.timerSeconds
+                });
             }
         } else {
-            console.log(`❌ Room ${roomCode} not found for rejoining player`);
-            socket.emit('error', 'Game room not found');
+            console.log(`📢 Sending player list to rejoining player`);
+            socket.emit('playerJoined', gameRoom.players);
         }
-    });
+    } else {
+        console.log(`❌ Room ${roomCode} not found for rejoining player`);
+        socket.emit('error', 'Game room not found');
+    }
+});
+
+// Sync player ID when reconnecting
+socket.on('syncPlayerId', (data) => {
+    const { roomCode, newSocketId } = data;
+    const gameRoom = gameRooms.get(roomCode);
+    
+    if (gameRoom) {
+        const playerIndex = gameRoom.players.findIndex(p => p.id === socket.id);
+        if (playerIndex !== -1) {
+            console.log(`🔄 Syncing player ID for ${gameRoom.players[playerIndex].name}`);
+            gameRoom.players[playerIndex].id = newSocketId;
+            
+            if (gameRoom.host === socket.id) {
+                gameRoom.host = newSocketId;
+            }
+            
+            if (gameRoom.draftState) {
+                // Update draft state player IDs
+                const draftPlayerIndex = gameRoom.draftState.players.findIndex(p => p.id === socket.id);
+                if (draftPlayerIndex !== -1) {
+                    gameRoom.draftState.players[draftPlayerIndex].id = newSocketId;
+                }
+                
+                if (gameRoom.draftState.currentPlayer && gameRoom.draftState.currentPlayer.id === socket.id) {
+                    gameRoom.draftState.currentPlayer.id = newSocketId;
+                }
+            }
+        }
+    }
+});
 
     // Make a pick during draft
     socket.on('makePick', (data) => {
