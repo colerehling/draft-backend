@@ -269,18 +269,21 @@ io.on('connection', (socket) => {
             gameRoom.gameState = 'drafting';
             gameRoom.draftState = draftState;
             
-            // Send draft started event to all players
+            console.log('📢 Broadcasting draftStarted to room:', roomCode);
             io.to(roomCode).emit('draftStarted', draftState);
             
-            // Emit turn change for the first player
-            const firstPlayer = draftState.currentPlayer;
-            console.log(`First player turn: ${firstPlayer.name} (${firstPlayer.id})`);
-            
-            io.to(roomCode).emit('turnChange', {
-                playerId: firstPlayer.id,
-                playerName: firstPlayer.name,
-                timeRemaining: draftState.timerSeconds
-            });
+            // Small delay to ensure draftStarted is processed first
+            setTimeout(() => {
+                const firstPlayer = draftState.currentPlayer;
+                console.log(`📢 Broadcasting turnChange to room ${roomCode}`);
+                console.log(`First player: ${firstPlayer.name} (${firstPlayer.id})`);
+                
+                io.to(roomCode).emit('turnChange', {
+                    playerId: firstPlayer.id,
+                    playerName: firstPlayer.name,
+                    timeRemaining: draftState.timerSeconds
+                });
+            }, 500);
             
             console.log(`✅ Draft started for room ${roomCode}`);
             
@@ -292,16 +295,17 @@ io.on('connection', (socket) => {
 
     // Re-join room (for draft page)
     socket.on('joinGameRoom', (roomCode) => {
+        console.log(`🔄 Player ${socket.id} rejoining room ${roomCode}`);
         const gameRoom = gameRooms.get(roomCode);
+        
         if (gameRoom) {
             socket.join(roomCode);
-            console.log(`🔄 Player ${socket.id} rejoined room ${roomCode}`);
+            console.log(`✅ Player ${socket.id} joined room ${roomCode}`);
             
-            if (gameRoom.draftState) {
-                // Send full draft state
+            if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
+                console.log('📢 Sending draft state to rejoining player');
                 socket.emit('draftStarted', gameRoom.draftState);
                 
-                // Send current turn info
                 const currentPlayer = gameRoom.draftState.currentPlayer;
                 if (currentPlayer) {
                     console.log(`📢 Sending turn info to rejoining player: ${currentPlayer.name}`);
@@ -312,11 +316,10 @@ io.on('connection', (socket) => {
                     });
                 }
             } else {
-                // If draft hasn't started, send player list
                 socket.emit('playerJoined', gameRoom.players);
             }
         } else {
-            console.log(`❌ Room ${roomCode} not found for rejoining player`);
+            console.log(`❌ Room ${roomCode} not found`);
             socket.emit('error', 'Game room not found');
         }
     });
@@ -344,7 +347,7 @@ io.on('connection', (socket) => {
         const currentPlayer = draft.players[currentPick.playerIndex];
         
         if (currentPlayer.id !== socket.id) {
-            console.log(`Not your turn! Current player: ${currentPlayer.name} (${currentPlayer.id}), Your: ${socket.id}`);
+            console.log(`Not your turn! Current: ${currentPlayer.name}, Your: ${socket.id}`);
             socket.emit('pickError', 'Not your turn');
             return;
         }
@@ -358,33 +361,27 @@ io.on('connection', (socket) => {
         const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
         const score = scoreItem ? scoreItem.score : 0;
         
-        // Remove item and add to player's picks
         draft.availableItems.splice(itemIndex, 1);
         draft.playersItems[currentPick.playerIndex].push({ name: itemName, score: score });
         
-        // Broadcast pick to all players
         io.to(roomCode).emit('pickMade', {
             playerId: socket.id,
             playerName: currentPlayer.name,
             item: itemName
         });
         
-        // Move to next pick
         draft.currentPickIndex++;
         
-        // Check if draft is complete
         if (draft.currentPickIndex >= draft.draftOrder.length) {
             console.log(`🏁 Draft complete for room ${roomCode}`);
             const results = calculateResults(draft.players, draft.playersItems);
             io.to(roomCode).emit('draftComplete', results);
         } else {
-            // Get next player
             const nextPick = draft.draftOrder[draft.currentPickIndex];
             draft.currentPlayer = draft.players[nextPick.playerIndex];
             
             console.log(`➡️ Next turn: ${draft.currentPlayer.name} (${draft.currentPlayer.id})`);
             
-            // Emit turn change to all players
             io.to(roomCode).emit('turnChange', {
                 playerId: draft.currentPlayer.id,
                 playerName: draft.currentPlayer.name,
@@ -404,15 +401,14 @@ io.on('connection', (socket) => {
                 const wasHost = gameRoom.host === socket.id;
                 gameRoom.players.splice(playerIndex, 1);
                 
-                console.log(`👋 Player ${disconnectedPlayer.name} left room ${roomCode}`);
+                console.log(`👋 ${disconnectedPlayer.name} left room ${roomCode}`);
                 io.to(roomCode).emit('playerLeft', gameRoom.players);
                 
                 if (gameRoom.players.length === 0) {
                     gameRooms.delete(roomCode);
-                    console.log(`🗑️ Room ${roomCode} deleted (empty)`);
+                    console.log(`🗑️ Room ${roomCode} deleted`);
                 } else if (wasHost && gameRoom.players.length > 0) {
                     gameRoom.host = gameRoom.players[0].id;
-                    console.log(`👑 New host in room ${roomCode}: ${gameRoom.players[0].name}`);
                     io.to(roomCode).emit('hostChanged', gameRoom.host);
                 }
                 break;
@@ -433,20 +429,12 @@ function generateRoomCode() {
 }
 
 async function loadGameItems(category) {
-    console.log(`loadGameItems called with category: ${category}`);
-    
-    if (!category) {
-        throw new Error('Category is required');
-    }
+    if (!category) throw new Error('Category is required');
     
     const safeCategory = category.replace(/[^a-z_]/gi, '');
-    console.log(`Safe category name: ${safeCategory}`);
     
     const tableCheck = await pgPool.query(`
-        SELECT EXISTS (
-            SELECT FROM information_schema.tables 
-            WHERE table_name = $1
-        )
+        SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = $1)
     `, [safeCategory]);
     
     if (!tableCheck.rows[0].exists) {
@@ -457,15 +445,10 @@ async function loadGameItems(category) {
         `SELECT item_name, score FROM "${safeCategory}" ORDER BY item_name`
     );
     
-    console.log(`Found ${result.rows.length} items in ${safeCategory}`);
     return result.rows;
 }
 
 function initializeDraftState(players, config, items) {
-    console.log(`Initializing draft state with ${items.length} items for ${players.length} players`);
-    console.log(`Players:`, players.map(p => ({ id: p.id, name: p.name })));
-    console.log(`Config category: ${config.category}`);
-    
     const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
     
     return {
@@ -501,15 +484,12 @@ function generateDraftOrder(numPlayers, numRounds, draftType) {
 }
 
 function calculateResults(players, playersItems) {
-    return players.map((player, index) => {
-        const totalScore = playersItems[index].reduce((sum, item) => sum + (item.score || 0), 0);
-        return {
-            playerId: player.id,
-            playerName: player.name,
-            totalScore: totalScore,
-            items: playersItems[index]
-        };
-    }).sort((a, b) => b.totalScore - a.totalScore);
+    return players.map((player, index) => ({
+        playerId: player.id,
+        playerName: player.name,
+        totalScore: playersItems[index].reduce((sum, item) => sum + (item.score || 0), 0),
+        items: playersItems[index]
+    })).sort((a, b) => b.totalScore - a.totalScore);
 }
 
 // Start server
