@@ -9,7 +9,7 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// Initialize Socket.IO with proper CORS
+// ✅ Initialize Socket.IO with proper CORS
 const io = socketIo(server, {
     cors: {
         origin: [
@@ -36,7 +36,7 @@ const pgPool = new Pool({
     }
 });
 
-// CORS for Express routes
+// ✅ CORS for Express routes
 app.use(cors({
     origin: [
         'https://draftanything.vercel.app',
@@ -56,7 +56,6 @@ const gameRooms = new Map();
 
 // ==================== API ROUTES ====================
 
-// Get all available categories - only those with live = 'yes'
 app.get('/api/categories', async (req, res) => {
     try {
         const result = await pgPool.query(`
@@ -65,8 +64,6 @@ app.get('/api/categories', async (req, res) => {
             WHERE live = 'yes'
             ORDER BY table_name
         `);
-        
-        console.log('Categories returned:', result.rows);
         
         const categories = result.rows.map(row => ({
             table_name: row.table_name,
@@ -80,7 +77,6 @@ app.get('/api/categories', async (req, res) => {
     }
 });
 
-// Get items with scores from specific category
 app.get('/api/items/:category/with-scores', async (req, res) => {
     const { category } = req.params;
     
@@ -95,7 +91,7 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
         }
         
         const result = await pgPool.query(
-            `SELECT item_name, score FROM ${category} ORDER BY item_name`
+            `SELECT item_name, score FROM "${category}" ORDER BY item_name`
         );
         res.json({ success: true, items: result.rows, category: category });
     } catch (error) {
@@ -104,7 +100,6 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
     }
 });
 
-// Health check endpoint
 app.get('/api/health', async (req, res) => {
     try {
         await pgPool.query('SELECT 1');
@@ -122,7 +117,6 @@ app.get('/api/health', async (req, res) => {
     }
 });
 
-// Root endpoint
 app.get('/', (req, res) => {
     res.json({
         name: 'Draft Game API',
@@ -140,7 +134,7 @@ app.get('/', (req, res) => {
 // ==================== SOCKET.IO MULTIPLAYER ====================
 
 io.on('connection', (socket) => {
-    console.log('New client connected:', socket.id);
+    console.log('🟢 New client connected:', socket.id);
 
     // Create a new game room
     socket.on('createGame', (gameConfig, callback) => {
@@ -151,7 +145,7 @@ io.on('connection', (socket) => {
             players: [{
                 id: socket.id,
                 name: gameConfig.playerName || 'Host',
-                isReady: true
+                isReady: true  // ✅ Host starts ready
             }],
             config: gameConfig,
             gameState: 'waiting',
@@ -162,8 +156,7 @@ io.on('connection', (socket) => {
         gameRooms.set(roomCode, gameRoom);
         socket.join(roomCode);
         
-        console.log(`Game created: ${roomCode} by ${socket.id}`);
-        
+        console.log(`🎮 Game created: ${roomCode} by ${socket.id}`);
         if (callback) callback({ success: true, roomCode: roomCode });
         io.to(roomCode).emit('playerJoined', gameRoom.players);
         io.to(roomCode).emit('hostReady', true);
@@ -193,8 +186,7 @@ io.on('connection', (socket) => {
         gameRoom.players.push(newPlayer);
         socket.join(roomCode);
         
-        console.log(`Player ${socket.id} joined room ${roomCode}`);
-        
+        console.log(`👤 Player ${socket.id} joined room ${roomCode}`);
         if (callback) callback({ success: true, roomCode: roomCode });
         io.to(roomCode).emit('playerJoined', gameRoom.players);
         io.to(roomCode).emit('playerCount', gameRoom.players.length);
@@ -219,9 +211,9 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Start the draft
+    // ✅ START DRAFT - Now properly inside the io.on('connection') block
     socket.on('startDraft', async (roomCode) => {
-        console.log(`Start draft requested for room: ${roomCode} by ${socket.id}`);
+        console.log(`🎯 Start draft requested for room: ${roomCode} by ${socket.id}`);
         
         const gameRoom = gameRooms.get(roomCode);
         
@@ -243,25 +235,87 @@ io.on('connection', (socket) => {
             return;
         }
         
-        console.log(`Starting draft for room: ${roomCode}`);
-        
         try {
             const items = await loadGameItems(gameRoom.config.category);
-            const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
             
+            if (!items || items.length === 0) {
+                socket.emit('startDraftError', `No items found for category "${gameRoom.config.category}"`);
+                return;
+            }
+            
+            const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
             gameRoom.gameState = 'drafting';
             gameRoom.draftState = draftState;
             
             io.to(roomCode).emit('draftStarted', draftState);
+            console.log(`✅ Draft started for room ${roomCode}`);
         } catch (error) {
-            console.error('Error loading items for draft:', error);
-            socket.emit('startDraftError', 'Failed to load draft items');
+            console.error('Error loading items:', error);
+            socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
+        }
+    });
+
+    // Re-join room (for draft page)
+    socket.on('joinGameRoom', (roomCode) => {
+        const gameRoom = gameRooms.get(roomCode);
+        if (gameRoom) {
+            socket.join(roomCode);
+            console.log(`🔄 Player ${socket.id} rejoined room ${roomCode}`);
+            
+            if (gameRoom.draftState) {
+                socket.emit('draftStarted', gameRoom.draftState);
+            }
+        }
+    });
+
+    // Make a pick during draft
+    socket.on('makePick', (data) => {
+        const { roomCode, itemName } = data;
+        const gameRoom = gameRooms.get(roomCode);
+        
+        if (!gameRoom || gameRoom.gameState !== 'drafting') return;
+        
+        const draft = gameRoom.draftState;
+        const currentPick = draft.draftOrder[draft.currentPickIndex];
+        
+        if (!currentPick || draft.players[currentPick.playerIndex].id !== socket.id) {
+            socket.emit('pickError', 'Not your turn');
+            return;
+        }
+        
+        const itemIndex = draft.availableItems.indexOf(itemName);
+        if (itemIndex === -1) {
+            socket.emit('pickError', 'Item not available');
+            return;
+        }
+        
+        const score = draft.itemsWithScores.find(i => i.item_name === itemName)?.score || 0;
+        draft.availableItems.splice(itemIndex, 1);
+        draft.playersItems[currentPick.playerIndex].push({ name: itemName, score: score });
+        
+        io.to(roomCode).emit('pickMade', {
+            playerId: socket.id,
+            item: itemName
+        });
+        
+        draft.currentPickIndex++;
+        
+        if (draft.currentPickIndex >= draft.draftOrder.length) {
+            io.to(roomCode).emit('draftComplete', calculateResults(draft.players, draft.playersItems));
+        } else {
+            const nextPick = draft.draftOrder[draft.currentPickIndex];
+            draft.currentPlayer = draft.players[nextPick.playerIndex];
+            io.to(roomCode).emit('turnChange', {
+                playerId: draft.currentPlayer.id,
+                playerName: draft.currentPlayer.name,
+                timeRemaining: draft.timerSeconds
+            });
         }
     });
 
     // Disconnect handling
     socket.on('disconnect', () => {
-        console.log('Client disconnected:', socket.id);
+        console.log('🔴 Client disconnected:', socket.id);
         
         for (const [roomCode, gameRoom] of gameRooms.entries()) {
             const playerIndex = gameRoom.players.findIndex(p => p.id === socket.id);
@@ -273,7 +327,7 @@ io.on('connection', (socket) => {
                 
                 if (gameRoom.players.length === 0) {
                     gameRooms.delete(roomCode);
-                    console.log(`Room ${roomCode} deleted (empty)`);
+                    console.log(`🗑️ Room ${roomCode} deleted (empty)`);
                 } else if (wasHost && gameRoom.players.length > 0) {
                     gameRoom.host = gameRoom.players[0].id;
                     io.to(roomCode).emit('hostChanged', gameRoom.host);
@@ -284,54 +338,26 @@ io.on('connection', (socket) => {
     });
 });
 
-// Helper functions
+// ==================== HELPER FUNCTIONS ====================
+
 function generateRoomCode() {
-    const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789';
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789';
     let code = '';
     for (let i = 0; i < 6; i++) {
-        code += characters.charAt(Math.floor(Math.random() * characters.length));
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
     }
     return code;
 }
 
-// Replace the loadGameItems function with this:
 async function loadGameItems(category) {
-    try {
-        console.log(`Loading items for category: ${category}`);
-        
-        // First, verify the table exists
-        const tableCheck = await pgPool.query(`
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_name = $1
-            )
-        `, [category]);
-        
-        if (!tableCheck.rows[0].exists) {
-            console.error(`Table ${category} does not exist`);
-            throw new Error(`Category table "${category}" not found`);
-        }
-        
-        // Then fetch items
-        const result = await pgPool.query(
-            `SELECT item_name, score FROM "${category}" ORDER BY item_name`
-        );
-        
-        console.log(`Loaded ${result.rows.length} items from ${category}`);
-        return result.rows;
-    } catch (error) {
-        console.error(`Error loading items from ${category}:`, error.message);
-        throw error;
-    }
+    const result = await pgPool.query(
+        `SELECT item_name, score FROM "${category}" ORDER BY item_name`
+    );
+    return result.rows;
 }
 
-// Also update the initializeDraftState function:
 function initializeDraftState(players, config, items) {
-    console.log(`Initializing draft state with ${items.length} items for ${players.length} players`);
-    console.log(`Config:`, config);
-    
     const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
-    
     return {
         players: players.map(p => ({ id: p.id, name: p.name })),
         availableItems: items.map(i => i.item_name),
@@ -347,64 +373,39 @@ function initializeDraftState(players, config, items) {
     };
 }
 
-// Update the startDraft event handler:
-socket.on('startDraft', async (roomCode) => {
-    console.log(`Start draft requested for room: ${roomCode} by ${socket.id}`);
-    
-    const gameRoom = gameRooms.get(roomCode);
-    
-    if (!gameRoom) {
-        socket.emit('startDraftError', 'Game room not found');
-        return;
-    }
-    
-    if (gameRoom.host !== socket.id) {
-        socket.emit('startDraftError', 'Only the host can start the draft');
-        return;
-    }
-    
-    const allReady = gameRoom.players.every(p => p.isReady === true);
-    const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
-    
-    if (!allReady || !correctCount) {
-        socket.emit('startDraftError', 'Not all players are ready');
-        return;
-    }
-    
-    console.log(`Starting draft for room: ${roomCode}`);
-    console.log(`Category: ${gameRoom.config.category}`);
-    
-    try {
-        const items = await loadGameItems(gameRoom.config.category);
-        
-        if (!items || items.length === 0) {
-            console.error(`No items found for category: ${gameRoom.config.category}`);
-            socket.emit('startDraftError', `No items found for category "${gameRoom.config.category}". Please check the database.`);
-            return;
+function generateDraftOrder(numPlayers, numRounds, draftType) {
+    const order = [];
+    for (let round = 1; round <= numRounds; round++) {
+        if (draftType === 'snake' && round % 2 === 0) {
+            for (let i = numPlayers - 1; i >= 0; i--) {
+                order.push({ playerIndex: i, round: round });
+            }
+        } else {
+            for (let i = 0; i < numPlayers; i++) {
+                order.push({ playerIndex: i, round: round });
+            }
         }
-        
-        const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
-        
-        gameRoom.gameState = 'drafting';
-        gameRoom.draftState = draftState;
-        
-        console.log(`Draft state initialized, sending to room: ${roomCode}`);
-        io.to(roomCode).emit('draftStarted', draftState);
-        
-    } catch (error) {
-        console.error('Error loading items for draft:', error);
-        socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
     }
-});
+    return order;
+}
+
+function calculateResults(players, playersItems) {
+    return players.map((player, index) => {
+        const totalScore = playersItems[index].reduce((sum, item) => sum + (item.score || 0), 0);
+        return {
+            playerId: player.id,
+            playerName: player.name,
+            totalScore: totalScore,
+            items: playersItems[index]
+        };
+    }).sort((a, b) => b.totalScore - a.totalScore);
+}
+
 // Start server
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 Server running on port ${PORT}`);
     console.log(`🔌 Socket.IO ready for multiplayer!`);
-    console.log(`\n📋 API endpoints ready:`);
-    console.log(`   GET /api/categories - Get all categories`);
-    console.log(`   GET /api/items/:category/with-scores - Get items with scores`);
-    console.log(`   GET /api/health - Health check`);
-    console.log(`\n✅ Ready to accept API requests\n`);
+    console.log(`✅ Ready to accept API requests\n`);
 });
 
 process.on('SIGINT', async () => {
@@ -413,4 +414,4 @@ process.on('SIGINT', async () => {
     process.exit(0);
 });
 
-module.exports = pgPool;
+module.exports = pgPool;module.exports = pgPool;
