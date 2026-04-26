@@ -13,16 +13,19 @@ const PORT = process.env.PORT || 3000;
 const io = socketIo(server, {
     cors: {
         origin: [
-            'https://draftanything.vercel.app',  // Your Vercel frontend
-            'http://localhost:5500',              // Local frontend
-            'http://localhost:3000',              // Local backend
-            'https://draft-frontend.vercel.app'  // Alternative Vercel URL
+            'https://draftanything.vercel.app',
+            'https://draft-frontend.vercel.app',
+            'http://localhost:5500',
+            'http://localhost:3000',
+            'http://127.0.0.1:5500',
+            'http://127.0.0.1:3000'
         ],
         methods: ["GET", "POST", "OPTIONS"],
         credentials: true,
         allowedHeaders: ["Content-Type", "Authorization"]
     },
-    transports: ['websocket', 'polling'] // Allow both transport methods
+    transports: ['websocket', 'polling'],
+    allowEIO3: true
 });
 
 const pgPool = new Pool({
@@ -33,13 +36,15 @@ const pgPool = new Pool({
     }
 });
 
-// CORS for Express routes (APIs)
+// CORS for Express routes
 app.use(cors({
     origin: [
         'https://draftanything.vercel.app',
+        'https://draft-frontend.vercel.app',
         'http://localhost:5500',
         'http://localhost:3000',
-        'https://draft-frontend.vercel.app'
+        'http://127.0.0.1:5500',
+        'http://127.0.0.1:3000'
     ],
     credentials: true
 }));
@@ -80,7 +85,6 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
     const { category } = req.params;
     
     try {
-        // Check if category exists
         const tableCheck = await pgPool.query(
             'SELECT table_name FROM draft_choices WHERE table_name = $1',
             [category]
@@ -139,31 +143,32 @@ io.on('connection', (socket) => {
     console.log('New client connected:', socket.id);
 
     // Create a new game room
-   socket.on('createGame', (gameConfig, callback) => {
-    const roomCode = generateRoomCode();
-    const gameRoom = {
-        roomCode: roomCode,
-        host: socket.id,
-        players: [{
-            id: socket.id,
-            name: gameConfig.playerName || 'Host',
-            isReady: true  // Host is automatically ready
-        }],
-        config: gameConfig,
-        gameState: 'waiting',
-        draftState: null,
-        createdAt: Date.now()
-    };
-    
-    gameRooms.set(roomCode, gameRoom);
-    socket.join(roomCode);
-    
-    console.log(`Game created: ${roomCode} by ${socket.id}`);
-    
-    if (callback) callback({ success: true, roomCode: roomCode });
-    io.to(roomCode).emit('playerJoined', gameRoom.players);
-    io.to(roomCode).emit('hostReady', true); // New event to notify host is ready
-});
+    socket.on('createGame', (gameConfig, callback) => {
+        const roomCode = generateRoomCode();
+        const gameRoom = {
+            roomCode: roomCode,
+            host: socket.id,
+            players: [{
+                id: socket.id,
+                name: gameConfig.playerName || 'Host',
+                isReady: true
+            }],
+            config: gameConfig,
+            gameState: 'waiting',
+            draftState: null,
+            createdAt: Date.now()
+        };
+        
+        gameRooms.set(roomCode, gameRoom);
+        socket.join(roomCode);
+        
+        console.log(`Game created: ${roomCode} by ${socket.id}`);
+        
+        if (callback) callback({ success: true, roomCode: roomCode });
+        io.to(roomCode).emit('playerJoined', gameRoom.players);
+        io.to(roomCode).emit('hostReady', true);
+    });
+
     // Join an existing game
     socket.on('joinGame', (data, callback) => {
         const { roomCode, playerName } = data;
@@ -204,12 +209,53 @@ io.on('connection', (socket) => {
                 player.isReady = true;
                 io.to(roomCode).emit('playerReadyUpdate', gameRoom.players);
                 
-                // Check if all players are ready
-                const allReady = gameRoom.players.every(p => p.isReady);
-                if (allReady && gameRoom.players.length === gameRoom.config.numPlayers) {
+                const allReady = gameRoom.players.every(p => p.isReady === true);
+                const fullPlayers = gameRoom.players.length === gameRoom.config.numPlayers;
+                
+                if (allReady && fullPlayers) {
                     io.to(roomCode).emit('allPlayersReady');
                 }
             }
+        }
+    });
+
+    // Start the draft
+    socket.on('startDraft', async (roomCode) => {
+        console.log(`Start draft requested for room: ${roomCode} by ${socket.id}`);
+        
+        const gameRoom = gameRooms.get(roomCode);
+        
+        if (!gameRoom) {
+            socket.emit('startDraftError', 'Game room not found');
+            return;
+        }
+        
+        if (gameRoom.host !== socket.id) {
+            socket.emit('startDraftError', 'Only the host can start the draft');
+            return;
+        }
+        
+        const allReady = gameRoom.players.every(p => p.isReady === true);
+        const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
+        
+        if (!allReady || !correctCount) {
+            socket.emit('startDraftError', 'Not all players are ready');
+            return;
+        }
+        
+        console.log(`Starting draft for room: ${roomCode}`);
+        
+        try {
+            const items = await loadGameItems(gameRoom.config.category);
+            const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
+            
+            gameRoom.gameState = 'drafting';
+            gameRoom.draftState = draftState;
+            
+            io.to(roomCode).emit('draftStarted', draftState);
+        } catch (error) {
+            console.error('Error loading items for draft:', error);
+            socket.emit('startDraftError', 'Failed to load draft items');
         }
     });
 
@@ -217,17 +263,20 @@ io.on('connection', (socket) => {
     socket.on('disconnect', () => {
         console.log('Client disconnected:', socket.id);
         
-        // Remove player from any game rooms
         for (const [roomCode, gameRoom] of gameRooms.entries()) {
             const playerIndex = gameRoom.players.findIndex(p => p.id === socket.id);
             if (playerIndex !== -1) {
+                const wasHost = gameRoom.host === socket.id;
                 gameRoom.players.splice(playerIndex, 1);
+                
                 io.to(roomCode).emit('playerLeft', gameRoom.players);
                 
-                // If room is empty, delete it
                 if (gameRoom.players.length === 0) {
                     gameRooms.delete(roomCode);
                     console.log(`Room ${roomCode} deleted (empty)`);
+                } else if (wasHost && gameRoom.players.length > 0) {
+                    gameRoom.host = gameRoom.players[0].id;
+                    io.to(roomCode).emit('hostChanged', gameRoom.host);
                 }
                 break;
             }
@@ -235,7 +284,7 @@ io.on('connection', (socket) => {
     });
 });
 
-// Helper function to generate room code
+// Helper functions
 function generateRoomCode() {
     const characters = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789';
     let code = '';
@@ -243,6 +292,46 @@ function generateRoomCode() {
         code += characters.charAt(Math.floor(Math.random() * characters.length));
     }
     return code;
+}
+
+async function loadGameItems(category) {
+    const result = await pgPool.query(
+        `SELECT item_name, score FROM ${category} ORDER BY item_name`
+    );
+    return result.rows;
+}
+
+function initializeDraftState(players, config, items) {
+    const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
+    return {
+        players: players.map(p => ({ id: p.id, name: p.name })),
+        availableItems: items.map(i => i.item_name),
+        itemsWithScores: items,
+        playersItems: players.map(() => []),
+        draftOrder: draftOrder,
+        currentPickIndex: 0,
+        currentPlayer: players[draftOrder[0].playerIndex],
+        numRounds: config.numRounds,
+        timerSeconds: config.timerMinutes * 60,
+        category: config.category,
+        categoryName: config.categoryName
+    };
+}
+
+function generateDraftOrder(numPlayers, numRounds, draftType) {
+    const order = [];
+    for (let round = 1; round <= numRounds; round++) {
+        if (draftType === 'snake' && round % 2 === 0) {
+            for (let i = numPlayers - 1; i >= 0; i--) {
+                order.push({ playerIndex: i, round: round });
+            }
+        } else {
+            for (let i = 0; i < numPlayers; i++) {
+                order.push({ playerIndex: i, round: round });
+            }
+        }
+    }
+    return order;
 }
 
 // Start server
