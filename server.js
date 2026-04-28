@@ -490,7 +490,7 @@ async function loadGameItems(category) {
     
     const safeCategory = category.replace(/[^a-z_]/gi, '');
     const result = await pgPool.query(
-        `SELECT item_name, score FROM "${safeCategory}" ORDER BY item_name`
+        `SELECT item_name, COALESCE(score, 0) as score FROM "${safeCategory}" ORDER BY item_name`
     );
     
     return result.rows;
