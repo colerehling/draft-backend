@@ -262,126 +262,129 @@ io.on('connection', (socket) => {
 
     // Start the draft
     socket.on('startDraft', async (roomCode) => {
-        console.log(`🎯 START DRAFT requested for room: ${roomCode} by ${socket.id}`);
+    console.log('🎯🎯🎯 START DRAFT RECEIVED! 🎯🎯🎯');
+    console.log('Room code:', roomCode);
+    console.log('From socket ID:', socket.id);
+    
+    const gameRoom = gameRooms.get(roomCode);
+    console.log('Game room found?', !!gameRoom);
+    
+    if (!gameRoom) {
+        console.log('❌ Game room not found!');
+        socket.emit('startDraftError', 'Game room not found');
+        return;
+    }
+    
+    console.log('Room host ID:', gameRoom.host);
+    console.log('Requestor ID:', socket.id);
+    console.log('Is host?', gameRoom.host === socket.id);
+    
+    if (gameRoom.host !== socket.id) {
+        console.log('❌ Not host!');
+        socket.emit('startDraftError', 'Only the host can start the draft');
+        return;
+    }
+    
+    const allReady = gameRoom.players.every(p => p.isReady === true);
+    const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
+    console.log('All players ready?', allReady);
+    console.log('Correct player count?', correctCount);
+    console.log('Expected players:', gameRoom.config.numPlayers);
+    console.log('Actual players:', gameRoom.players.length);
+    
+    if (!allReady || !correctCount) {
+        console.log('❌ Not all players ready!');
+        socket.emit('startDraftError', 'Not all players are ready');
+        return;
+    }
+    
+    const category = gameRoom.config.category;
+    console.log('Loading items for category:', category);
+    
+    try {
+        const items = await loadGameItems(category);
+        console.log('Items loaded:', items.length);
         
-        const gameRoom = gameRooms.get(roomCode);
-        
-        if (!gameRoom) {
-            socket.emit('startDraftError', 'Game room not found');
+        if (!items || items.length === 0) {
+            socket.emit('startDraftError', `No items found for category "${category}"`);
             return;
         }
         
-        if (gameRoom.host !== socket.id) {
-            socket.emit('startDraftError', 'Only the host can start the draft');
-            return;
-        }
+        const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
+        gameRoom.gameState = 'drafting';
+        gameRoom.draftState = draftState;
         
-        const allReady = gameRoom.players.every(p => p.isReady === true);
-        const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
+        console.log('📢 Broadcasting draftStarted to room:', roomCode);
+        console.log('Room has sockets:', io.sockets.adapter.rooms.get(roomCode));
         
-        if (!allReady || !correctCount) {
-            socket.emit('startDraftError', 'Not all players are ready');
-            return;
-        }
+        io.to(roomCode).emit('draftStarted', draftState);
         
-        const category = gameRoom.config.category;
+        const firstPlayer = draftState.currentPlayer;
+        console.log('📢 First player:', firstPlayer.name, firstPlayer.id);
+        console.log('📢 Broadcasting turnChange to room:', roomCode);
         
-        if (!category) {
-            socket.emit('startDraftError', 'No category selected');
-            return;
-        }
+        io.to(roomCode).emit('turnChange', {
+            playerId: firstPlayer.id,
+            playerName: firstPlayer.name,
+            timeRemaining: draftState.timerSeconds
+        });
         
-        try {
-            const items = await loadGameItems(category);
-            
-            if (!items || items.length === 0) {
-                socket.emit('startDraftError', `No items found for category "${category}"`);
-                return;
-            }
-            
-            const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
-            gameRoom.gameState = 'drafting';
-            gameRoom.draftState = draftState;
-            
-            console.log(`📢 Broadcasting draftStarted to room: ${roomCode}`);
-            io.to(roomCode).emit('draftStarted', draftState);
-            
-            const firstPlayer = draftState.currentPlayer;
-            console.log(`📢 First player: ${firstPlayer.name}`);
-            console.log(`📢 Broadcasting turnChange to room: ${roomCode}`);
-            
-            io.to(roomCode).emit('turnChange', {
-                playerId: firstPlayer.id,
-                playerName: firstPlayer.name,
-                timeRemaining: draftState.timerSeconds
-            });
-            
-            console.log(`✅ Draft started successfully`);
-            
-        } catch (error) {
-            console.error('Error:', error);
-            socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
-        }
-    });
+        console.log('✅ Draft started successfully!');
+        
+    } catch (error) {
+        console.error('Error:', error);
+        socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
+    }
+});
 
     // Re-join room (for draft page)
     socket.on('joinGameRoom', (roomCode) => {
-        console.log(`🔄 Player ${socket.id} rejoining room ${roomCode}`);
-        const gameRoom = gameRooms.get(roomCode);
+    console.log(`🔄 Player ${socket.id} rejoining room ${roomCode}`);
+    const gameRoom = gameRooms.get(roomCode);
+    
+    if (gameRoom) {
+        // Force join the room
+        socket.join(roomCode);
+        console.log(`✅ Player ${socket.id} joined room ${roomCode}`);
+        console.log(`Current sockets in room ${roomCode}:`, io.sockets.adapter.rooms.get(roomCode));
         
-        if (gameRoom) {
-            // Check if this player is the host (by name, since ID may have changed)
-            const hostPlayer = gameRoom.players.find(p => p.name === 'Host');
+        // Update host ID if this is the host
+        const hostPlayer = gameRoom.players.find(p => p.name === 'Host');
+        if (hostPlayer && hostPlayer.id !== socket.id) {
+            console.log(`👑 Updating host ID from ${hostPlayer.id} to ${socket.id}`);
+            hostPlayer.id = socket.id;
+            gameRoom.host = socket.id;
+        }
+        
+        // Send current state
+        if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
+            console.log('📢 Sending draft state to rejoining player');
+            socket.emit('draftStarted', gameRoom.draftState);
             
-            if (hostPlayer && hostPlayer.id !== socket.id) {
-                console.log(`👑 Updating host ID from ${hostPlayer.id} to ${socket.id}`);
-                hostPlayer.id = socket.id;
-                gameRoom.host = socket.id;
-                
-                // Update draft state if exists
-                if (gameRoom.draftState) {
-                    for (let i = 0; i < gameRoom.draftState.players.length; i++) {
-                        if (gameRoom.draftState.players[i].name === 'Host') {
-                            gameRoom.draftState.players[i].id = socket.id;
-                        }
-                    }
-                    if (gameRoom.draftState.currentPlayer && gameRoom.draftState.currentPlayer.name === 'Host') {
-                        gameRoom.draftState.currentPlayer.id = socket.id;
-                    }
-                }
-            }
-            
-            socket.join(roomCode);
-            console.log(`✅ Player joined room ${roomCode}`);
-            
-            if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
-                console.log(`📢 Sending draft state to rejoining player`);
-                socket.emit('draftStarted', gameRoom.draftState);
-                
-                const currentPlayer = gameRoom.draftState.currentPlayer;
-                if (currentPlayer) {
-                    console.log(`📢 Sending turn info: ${currentPlayer.name} (${currentPlayer.id})`);
-                    socket.emit('turnChange', {
-                        playerId: currentPlayer.id,
-                        playerName: currentPlayer.name,
-                        timeRemaining: gameRoom.draftState.timerSeconds
-                    });
-                }
-            } else {
-                console.log(`📢 Sending player list (draft not started yet)`);
-                socket.emit('playerJoined', gameRoom.players);
+            const currentPlayer = gameRoom.draftState.currentPlayer;
+            if (currentPlayer) {
+                console.log('📢 Sending turn info to rejoining player');
+                socket.emit('turnChange', {
+                    playerId: currentPlayer.id,
+                    playerName: currentPlayer.name,
+                    timeRemaining: gameRoom.draftState.timerSeconds
+                });
             }
         } else {
-            console.log(`❌ Room ${roomCode} not found`);
-            socket.emit('error', 'Game room not found');
+            console.log('📢 Sending player list (draft not started)');
+            socket.emit('playerJoined', gameRoom.players);
         }
-    });
+    } else {
+        console.log(`❌ Room ${roomCode} not found`);
+        socket.emit('error', 'Game room not found');
+    }
+});
 
-    // Make a pick during draft
-    socket.on('makePick', (data) => {
-        const { roomCode, itemName } = data;
-        console.log(`📦 Pick: ${itemName} from ${socket.id}`);
-        
+// Make a pick during draft
+socket.on('makePick', (data) => {
+    const { roomCode, itemName } = data;
+    console.log(`📦 Pick: ${itemName} from ${socket.id}`);
+
         const gameRoom = gameRooms.get(roomCode);
         
         if (!gameRoom || gameRoom.gameState !== 'drafting') {
