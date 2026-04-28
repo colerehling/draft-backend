@@ -262,7 +262,7 @@ io.on('connection', (socket) => {
 
     // Start the draft
     socket.on('startDraft', async (roomCode) => {
-        console.log(`🎯 Start draft requested for room: ${roomCode} by ${socket.id}`);
+        console.log(`🎯 START DRAFT requested for room: ${roomCode} by ${socket.id}`);
         
         const gameRoom = gameRooms.get(roomCode);
         
@@ -330,14 +330,37 @@ io.on('connection', (socket) => {
         const gameRoom = gameRooms.get(roomCode);
         
         if (gameRoom) {
+            // Check if this player is the host (by name, since ID may have changed)
+            const hostPlayer = gameRoom.players.find(p => p.name === 'Host');
+            
+            if (hostPlayer && hostPlayer.id !== socket.id) {
+                console.log(`👑 Updating host ID from ${hostPlayer.id} to ${socket.id}`);
+                hostPlayer.id = socket.id;
+                gameRoom.host = socket.id;
+                
+                // Update draft state if exists
+                if (gameRoom.draftState) {
+                    for (let i = 0; i < gameRoom.draftState.players.length; i++) {
+                        if (gameRoom.draftState.players[i].name === 'Host') {
+                            gameRoom.draftState.players[i].id = socket.id;
+                        }
+                    }
+                    if (gameRoom.draftState.currentPlayer && gameRoom.draftState.currentPlayer.name === 'Host') {
+                        gameRoom.draftState.currentPlayer.id = socket.id;
+                    }
+                }
+            }
+            
             socket.join(roomCode);
             console.log(`✅ Player joined room ${roomCode}`);
             
             if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
+                console.log(`📢 Sending draft state to rejoining player`);
                 socket.emit('draftStarted', gameRoom.draftState);
                 
                 const currentPlayer = gameRoom.draftState.currentPlayer;
                 if (currentPlayer) {
+                    console.log(`📢 Sending turn info: ${currentPlayer.name} (${currentPlayer.id})`);
                     socket.emit('turnChange', {
                         playerId: currentPlayer.id,
                         playerName: currentPlayer.name,
@@ -345,6 +368,7 @@ io.on('connection', (socket) => {
                     });
                 }
             } else {
+                console.log(`📢 Sending player list (draft not started yet)`);
                 socket.emit('playerJoined', gameRoom.players);
             }
         } else {
@@ -413,6 +437,12 @@ io.on('connection', (socket) => {
                 timeRemaining: draft.timerSeconds
             });
         }
+    });
+
+    // Test connection event
+    socket.on('testConnection', (data) => {
+        console.log('📡 Test connection from client:', data);
+        socket.emit('testResponse', { received: true, timestamp: Date.now() });
     });
 
     // Disconnect handling
