@@ -95,7 +95,7 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
         
         const safeCategory = category.replace(/[^a-z_]/gi, '');
         const result = await pgPool.query(
-            `SELECT item_name, COALESCE(score, 0) as score FROM "${safeCategory}" ORDER BY item_name`
+            `SELECT item_name, CAST(COALESCE(score, 0) AS FLOAT) as score FROM "${safeCategory}" ORDER BY item_name`
         );
         
         console.log(`Found ${result.rows.length} items in ${category}`);
@@ -417,7 +417,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Make a pick during draft with chemistry tracking
+    // Make a pick during draft with proper numeric score calculation
     socket.on('makePick', async (data) => {
         const { roomCode, itemName } = data;
         console.log(`📦 Pick: ${itemName} from ${socket.id}`);
@@ -450,49 +450,58 @@ io.on('connection', (socket) => {
             return;
         }
         
+        // Get base score as number
         const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
-        let baseScore = scoreItem ? scoreItem.score : 0;
+        let baseScore = scoreItem ? parseFloat(scoreItem.score) : 0;
         
+        // Check chemistry with existing items
         const playerExistingItems = draft.playersItems[currentPick.playerIndex];
         const chemistryResults = await checkChemistry(draft.category, playerExistingItems, itemName);
         
+        // Calculate total score with chemistry (numeric addition)
+        const chemistryBonus = chemistryResults.totalEffect;
+        const totalScore = baseScore + chemistryBonus;
+        
+        console.log(`Item: ${itemName}, Base Score: ${baseScore}, Chemistry Bonus: ${chemistryBonus}, Total: ${totalScore}`);
+        
+        // Store chemistry data for results page
         const draftSessionId = roomCode;
         if (!draftChemistryData.has(draftSessionId)) {
-            draftChemistryData.set(draftSessionId, {});
+            draftChemistryData.set(draftSessionId, new Map());
         }
         const sessionChemistry = draftChemistryData.get(draftSessionId);
-        if (!sessionChemistry[currentPick.playerIndex]) {
-            sessionChemistry[currentPick.playerIndex] = [];
+        if (!sessionChemistry.has(currentPick.playerIndex)) {
+            sessionChemistry.set(currentPick.playerIndex, []);
         }
+        const playerChemistry = sessionChemistry.get(currentPick.playerIndex);
         
         for (const synergy of chemistryResults.synergies) {
-            sessionChemistry[currentPick.playerIndex].push({
+            playerChemistry.push({
                 type: 'synergy',
-                text: `${synergy.comboName || 'Synergy'} with ${synergy.with}`,
-                with: synergy.with,
+                text: `${synergy.comboName || 'Bonus'} - ${itemName} & ${synergy.with}`,
                 points: synergy.points
             });
         }
         for (const conflict of chemistryResults.conflicts) {
-            sessionChemistry[currentPick.playerIndex].push({
+            playerChemistry.push({
                 type: 'conflict',
-                text: `${conflict.comboName || 'Conflict'} with ${conflict.with}`,
-                with: conflict.with,
+                text: `${conflict.comboName || 'Penalty'} - ${itemName} & ${conflict.with}`,
                 points: conflict.points
             });
         }
+        sessionChemistry.set(currentPick.playerIndex, playerChemistry);
         
-        const totalScore = baseScore + chemistryResults.totalEffect;
-        
+        // Remove item and add to player's picks with numeric scores
         draft.availableItems.splice(itemIndex, 1);
         draft.playersItems[currentPick.playerIndex].push({
             name: itemName,
             score: totalScore,
             baseScore: baseScore,
-            chemistryBonus: chemistryResults.totalEffect,
+            chemistryBonus: chemistryBonus,
             chemistryDetails: chemistryResults
         });
         
+        // Broadcast pick to all players
         io.to(roomCode).emit('pickMade', {
             playerId: socket.id,
             playerName: currentPlayer.name,
@@ -503,6 +512,7 @@ io.on('connection', (socket) => {
         draft.currentPickIndex++;
         
         if (draft.currentPickIndex >= draft.draftOrder.length) {
+            // Calculate final results with proper numeric scores
             const results = calculateFinalResultsWithChemistry(draft, draftSessionId, sessionChemistry);
             io.to(roomCode).emit('draftComplete', results);
         } else {
@@ -566,7 +576,7 @@ async function loadGameItems(category) {
     
     const safeCategory = category.replace(/[^a-z_]/gi, '');
     const result = await pgPool.query(
-        `SELECT item_name, COALESCE(score, 0) as score FROM "${safeCategory}" ORDER BY item_name`
+        `SELECT item_name, CAST(COALESCE(score, 0) AS FLOAT) as score FROM "${safeCategory}" ORDER BY item_name`
     );
     
     return result.rows;
@@ -608,25 +618,47 @@ function generateDraftOrder(numPlayers, numRounds, draftType) {
 }
 
 function calculateFinalResultsWithChemistry(draft, draftSessionId, chemistryData) {
+    console.log('Calculating final results with chemistry data:', chemistryData);
+    
     const results = [];
     
     for (let i = 0; i < draft.players.length; i++) {
         let totalScore = 0;
         let bestPick = null;
         let worstPick = null;
+        let playerChemistryMoves = [];
         
+        // Get chemistry moves for this player
+        if (chemistryData && chemistryData.has(i)) {
+            playerChemistryMoves = chemistryData.get(i);
+            console.log(`Player ${draft.players[i].name} chemistry moves:`, playerChemistryMoves);
+        }
+        
+        // Calculate total score by adding numbers (not concatenating)
         for (const item of draft.playersItems[i]) {
-            totalScore += item.score;
+            let itemScore = parseFloat(item.score) || 0;
+            totalScore += itemScore;
             
-            if (!bestPick || (item.baseScore > bestPick.score)) {
-                bestPick = { name: item.name, score: item.baseScore };
+            console.log(`Item: ${item.name}, Score: ${itemScore}, Running Total: ${totalScore}`);
+            
+            // Find best and worst picks by base score
+            const baseScore = parseFloat(item.baseScore) || 0;
+            if (!bestPick || baseScore > bestPick.score) {
+                bestPick = { name: item.name, score: baseScore };
             }
-            if (!worstPick || (item.baseScore < worstPick.score)) {
-                worstPick = { name: item.name, score: item.baseScore };
+            if (!worstPick || baseScore < worstPick.score) {
+                worstPick = { name: item.name, score: baseScore };
             }
         }
         
-        const chemistryMoves = chemistryData ? (chemistryData[i] || []) : [];
+        // Add chemistry points to total score
+        let chemistryTotal = 0;
+        for (const move of playerChemistryMoves) {
+            chemistryTotal += move.points || 0;
+        }
+        totalScore += chemistryTotal;
+        
+        console.log(`Player ${draft.players[i].name} - Items Total: ${totalScore - chemistryTotal}, Chemistry: ${chemistryTotal}, Final: ${totalScore}`);
         
         results.push({
             playerIndex: i,
@@ -634,13 +666,15 @@ function calculateFinalResultsWithChemistry(draft, draftSessionId, chemistryData
             totalScore: totalScore,
             bestPick: bestPick,
             worstPick: worstPick,
-            chemistryMoves: chemistryMoves,
+            chemistryMoves: playerChemistryMoves,
             items: draft.playersItems[i]
         });
     }
     
+    // Sort by total score (highest first)
     results.sort((a, b) => b.totalScore - a.totalScore);
     
+    // Add place
     let currentPlace = 1;
     let previousScore = null;
     results.forEach((player, index) => {
@@ -650,6 +684,8 @@ function calculateFinalResultsWithChemistry(draft, draftSessionId, chemistryData
         player.place = currentPlace;
         previousScore = player.totalScore;
     });
+    
+    console.log('Final results sorted by score:', results.map(r => ({ name: r.playerName, score: r.totalScore, place: r.place })));
     
     return results;
 }
