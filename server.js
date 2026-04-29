@@ -531,6 +531,63 @@ function generateDraftOrder(numPlayers, numRounds, draftType) {
     return order;
 }
 
+// ==================== CHEMISTRY SYSTEM ====================
+
+// Function to check chemistry between items (stores results but doesn't affect scoring)
+async function checkChemistry(category, items, newItem) {
+    const tableName = category;
+    
+    const chemistryResults = {
+        synergies: [],
+        conflicts: [],
+        totalEffect: 0
+    };
+    
+    for (const existingItem of items) {
+        const result = await pgPool.query(`
+            SELECT effect_type, points, combo_name 
+            FROM item_synergies 
+            WHERE table_name = $1 
+            AND ((item1_name = $2 AND item2_name = $3) OR (item1_name = $3 AND item2_name = $2))
+        `, [tableName, existingItem.name, newItem]);
+        
+        if (result.rows.length > 0) {
+            const chem = result.rows[0];
+            if (chem.effect_type === 'synergy') {
+                chemistryResults.synergies.push({
+                    with: existingItem.name,
+                    points: chem.points,
+                    comboName: chem.combo_name
+                });
+                chemistryResults.totalEffect += chem.points;
+            } else if (chem.effect_type === 'conflict') {
+                chemistryResults.conflicts.push({
+                    with: existingItem.name,
+                    points: chem.points,
+                    comboName: chem.combo_name
+                });
+                chemistryResults.totalEffect += chem.points;
+            }
+        }
+    }
+    
+    return chemistryResults;
+}
+
+// Function to find best and worst picks for a player
+function findBestAndWorstPicks(items) {
+    if (!items || items.length === 0) {
+        return { best: null, worst: null };
+    }
+    
+    // Items already have scores from the database
+    const sorted = [...items].sort((a, b) => (b.score || 0) - (a.score || 0));
+    return {
+        best: sorted[0],
+        worst: sorted[sorted.length - 1]
+    };
+}
+
 function calculateResults(players, playersItems) {
     return players.map((player, index) => ({
         playerId: player.id,
