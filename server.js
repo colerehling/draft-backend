@@ -566,113 +566,119 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Start the draft
-    socket.on('startDraft', async (roomCode) => {
-        console.log(`🎯 START DRAFT requested for room: ${roomCode} by ${socket.id}`);
+   // Start the draft
+socket.on('startDraft', async (roomCode) => {
+    console.log(`🎯 START DRAFT requested for room: ${roomCode} by ${socket.id}`);
+    
+    const gameRoom = gameRooms.get(roomCode);
+    
+    if (!gameRoom) {
+        socket.emit('startDraftError', 'Game room not found');
+        return;
+    }
+    
+    if (gameRoom.host !== socket.id) {
+        socket.emit('startDraftError', 'Only the host can start the draft');
+        return;
+    }
+    
+    const allReady = gameRoom.players.every(p => p.isReady === true);
+    const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
+    
+    if (!allReady || !correctCount) {
+        socket.emit('startDraftError', 'Not all players are ready');
+        return;
+    }
+    
+    const draftMode = gameRoom.config.draftMode || 'simple';
+    
+    try {
+        let draftState;
         
-        const gameRoom = gameRooms.get(roomCode);
-        
-        if (!gameRoom) {
-            socket.emit('startDraftError', 'Game room not found');
-            return;
-        }
-        
-        if (gameRoom.host !== socket.id) {
-            socket.emit('startDraftError', 'Only the host can start the draft');
-            return;
-        }
-        
-        const allReady = gameRoom.players.every(p => p.isReady === true);
-        const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
-        
-        if (!allReady || !correctCount) {
-            socket.emit('startDraftError', 'Not all players are ready');
-            return;
-        }
-        
-        const draftMode = gameRoom.config.draftMode || 'simple';
-        
-        try {
-            let draftState;
-            
-            if (draftMode === 'simple') {
-                const category = gameRoom.config.category;
-                if (!category) {
-                    socket.emit('startDraftError', 'No category selected');
-                    return;
-                }
-                const items = await loadGameItems(category);
-                if (!items || items.length === 0) {
-                    socket.emit('startDraftError', `No items found for category "${category}"`);
-                    return;
-                }
-                draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
-            } else {
-                // Dynamic draft mode
-                const templateName = gameRoom.config.templateName;
-                if (!templateName) {
-                    socket.emit('startDraftError', 'No template selected');
-                    return;
-                }
-                
-                // Get template slots
-                const slotsResult = await pgPool.query(`
-                    SELECT slot_name, slot_order, description 
-                    FROM dynamic_draft_slots ds
-                    JOIN dynamic_draft_choices dc ON dc.id = ds.template_id
-                    WHERE dc.template_name = $1
-                    ORDER BY ds.slot_order
-                `, [templateName]);
-                
-                const slots = slotsResult.rows;
-                
-                if (slots.length === 0) {
-                    socket.emit('startDraftError', 'No slots found for this template');
-                    return;
-                }
-                
-                // Get table name and load items for each slot
-                const tableResult = await pgPool.query(
-                    'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
-                    [templateName]
-                );
-                const tableName = tableResult.rows[0].table_name;
-                
-                const slotItemsMap = {};
-                for (const slot of slots) {
-                    const itemsResult = await pgPool.query(
-                        `SELECT item_name, score FROM "${tableName}" WHERE category = $1 ORDER BY item_name`,
-                        [slot.slot_name]
-                    );
-                    slotItemsMap[slot.slot_name] = itemsResult.rows;
-                }
-                
-                draftState = initializeDynamicDraftState(gameRoom.players, gameRoom.config, slots, slotItemsMap);
+        if (draftMode === 'simple') {
+            const category = gameRoom.config.category;
+            if (!category) {
+                socket.emit('startDraftError', 'No category selected');
+                return;
+            }
+            const items = await loadGameItems(category);
+            if (!items || items.length === 0) {
+                socket.emit('startDraftError', `No items found for category "${category}"`);
+                return;
+            }
+            draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
+        } else {
+            // Dynamic draft mode
+            const templateName = gameRoom.config.templateName;
+            if (!templateName) {
+                socket.emit('startDraftError', 'No template selected');
+                return;
             }
             
-            gameRoom.gameState = 'drafting';
-            gameRoom.draftState = draftState;
+            // Get template slots - FIXED ambiguous column reference
+            const slotsResult = await pgPool.query(`
+                SELECT ds.slot_name, ds.slot_order, ds.description 
+                FROM dynamic_draft_slots ds
+                INNER JOIN dynamic_draft_choices dc ON dc.id = ds.template_id
+                WHERE dc.template_name = $1
+                ORDER BY ds.slot_order
+            `, [templateName]);
             
-            console.log(`📢 Broadcasting draftStarted to room: ${roomCode}`);
-            io.to(roomCode).emit('draftStarted', draftState);
+            const slots = slotsResult.rows;
             
-            const firstPlayer = draftState.currentPlayer;
-            console.log(`📢 First player: ${firstPlayer.name}`);
-            console.log(`📢 Broadcasting turnChange to room: ${roomCode}`);
+            if (slots.length === 0) {
+                socket.emit('startDraftError', 'No slots found for this template');
+                return;
+            }
             
-            io.to(roomCode).emit('turnChange', {
-                playerId: firstPlayer.id,
-                playerName: firstPlayer.name,
-                timeRemaining: draftState.timerSeconds
-            });
+            // Get table name
+            const tableResult = await pgPool.query(
+                'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
+                [templateName]
+            );
             
-            console.log(`✅ Draft started successfully`);
+            if (tableResult.rows.length === 0) {
+                socket.emit('startDraftError', 'Template table not found');
+                return;
+            }
             
-        } catch (error) {
-            console.error('Error:', error);
-            socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
+            const tableName = tableResult.rows[0].table_name;
+            
+            const slotItemsMap = {};
+            for (const slot of slots) {
+                const itemsResult = await pgPool.query(
+                    `SELECT item_name, score FROM "${tableName}" WHERE category = $1 ORDER BY item_name`,
+                    [slot.slot_name]
+                );
+                slotItemsMap[slot.slot_name] = itemsResult.rows;
+            }
+            
+            draftState = initializeDynamicDraftState(gameRoom.players, gameRoom.config, slots, slotItemsMap);
         }
-    });
+        
+        gameRoom.gameState = 'drafting';
+        gameRoom.draftState = draftState;
+        
+        console.log(`📢 Broadcasting draftStarted to room: ${roomCode}`);
+        io.to(roomCode).emit('draftStarted', draftState);
+        
+        const firstPlayer = draftState.currentPlayer;
+        console.log(`📢 First player: ${firstPlayer.name}`);
+        console.log(`📢 Broadcasting turnChange to room: ${roomCode}`);
+        
+        io.to(roomCode).emit('turnChange', {
+            playerId: firstPlayer.id,
+            playerName: firstPlayer.name,
+            timeRemaining: draftState.timerSeconds
+        });
+        
+        console.log(`✅ Draft started successfully`);
+        
+    } catch (error) {
+        console.error('Error starting draft:', error);
+        socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
+    }
+});
 
     // Re-join room (for draft page)
     socket.on('joinGameRoom', (roomCode) => {
