@@ -137,6 +137,113 @@ app.get('/', (req, res) => {
     });
 });
 
+// ==================== DYNAMIC DRAFT API ENDPOINTS ====================
+
+// Get all dynamic draft templates
+app.get('/api/dynamic-templates', async (req, res) => {
+    try {
+        const templates = await pgPool.query(`
+            SELECT ddc.*, 
+                   COALESCE(
+                       (SELECT json_agg(json_build_object('slot_name', dds.slot_name, 'slot_order', dds.slot_order, 'description', dds.description) ORDER BY dds.slot_order)
+                        FROM dynamic_draft_slots dds WHERE dds.template_id = ddc.id
+                   ), '[]'::json) as slots
+            FROM dynamic_draft_choices ddc
+            WHERE ddc.is_active = true
+            ORDER BY ddc.id
+        `);
+        res.json({ success: true, templates: templates.rows });
+    } catch (error) {
+        console.error('Error fetching dynamic templates:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Get slots for a specific template
+app.get('/api/dynamic-template/:templateName/slots', async (req, res) => {
+    const { templateName } = req.params;
+    try {
+        const result = await pgPool.query(`
+            SELECT dds.slot_name, dds.slot_order, dds.description
+            FROM dynamic_draft_slots dds
+            JOIN dynamic_draft_choices ddc ON ddc.id = dds.template_id
+            WHERE ddc.template_name = $1
+            ORDER BY dds.slot_order
+        `, [templateName]);
+        res.json({ success: true, slots: result.rows });
+    } catch (error) {
+        console.error('Error fetching template slots:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Get items for a specific template and category
+app.get('/api/dynamic-items/:templateName/:category', async (req, res) => {
+    const { templateName, category } = req.params;
+    try {
+        // Get the table name from the template
+        const templateResult = await pgPool.query(
+            'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
+            [templateName]
+        );
+        
+        if (templateResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+        
+        const tableName = templateResult.rows[0].table_name;
+        
+        // Query items from the specific table
+        const items = await pgPool.query(
+            `SELECT item_name, score FROM "${tableName}" WHERE category = $1 ORDER BY item_name`,
+            [category]
+        );
+        
+        res.json({ success: true, items: items.rows, category: category });
+    } catch (error) {
+        console.error('Error fetching dynamic items:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// Get all items for a template (by category)
+app.get('/api/dynamic-all-items/:templateName', async (req, res) => {
+    const { templateName } = req.params;
+    try {
+        const templateResult = await pgPool.query(
+            'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
+            [templateName]
+        );
+        
+        if (templateResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+        
+        const tableName = templateResult.rows[0].table_name;
+        
+        const items = await pgPool.query(
+            `SELECT item_name, category, score FROM "${tableName}" ORDER BY category, item_name`
+        );
+        
+        // Group by category
+        const groupedItems = {};
+        items.rows.forEach(item => {
+            if (!groupedItems[item.category]) {
+                groupedItems[item.category] = [];
+            }
+            groupedItems[item.category].push({
+                item_name: item.item_name,
+                score: item.score
+            });
+        });
+        
+        res.json({ success: true, items: groupedItems });
+    } catch (error) {
+        console.error('Error fetching all dynamic items:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 // ==================== CHEMISTRY FUNCTIONS ====================
 
 async function checkChemistry(category, items, newItem) {
