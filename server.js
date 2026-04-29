@@ -53,6 +53,7 @@ app.use(express.json());
 
 // Store active game rooms
 const gameRooms = new Map();
+const draftChemistryData = new Map(); // Store chemistry for each draft session
 
 // ==================== API ROUTES ====================
 
@@ -94,7 +95,7 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
         
         const safeCategory = category.replace(/[^a-z_]/gi, '');
         const result = await pgPool.query(
-            `SELECT item_name, score FROM "${safeCategory}" ORDER BY item_name`
+            `SELECT item_name, COALESCE(score, 0) as score FROM "${safeCategory}" ORDER BY item_name`
         );
         
         console.log(`Found ${result.rows.length} items in ${category}`);
@@ -135,6 +136,49 @@ app.get('/', (req, res) => {
         websocket: 'Socket.IO enabled for multiplayer'
     });
 });
+
+// ==================== CHEMISTRY FUNCTIONS ====================
+
+async function checkChemistry(category, items, newItem) {
+    const tableName = category;
+    console.log(`Checking chemistry for ${newItem} in ${tableName}`);
+    
+    const chemistryResults = {
+        synergies: [],
+        conflicts: [],
+        totalEffect: 0
+    };
+    
+    for (const existingItem of items) {
+        const result = await pgPool.query(`
+            SELECT effect_type, points, combo_name 
+            FROM item_synergies 
+            WHERE table_name = $1 
+            AND ((item1_name = $2 AND item2_name = $3) OR (item1_name = $3 AND item2_name = $2))
+        `, [tableName, existingItem.name, newItem]);
+        
+        if (result.rows.length > 0) {
+            const chem = result.rows[0];
+            if (chem.effect_type === 'synergy') {
+                chemistryResults.synergies.push({
+                    with: existingItem.name,
+                    points: chem.points,
+                    comboName: chem.combo_name
+                });
+                chemistryResults.totalEffect += chem.points;
+            } else if (chem.effect_type === 'conflict') {
+                chemistryResults.conflicts.push({
+                    with: existingItem.name,
+                    points: chem.points,
+                    comboName: chem.combo_name
+                });
+                chemistryResults.totalEffect += chem.points;
+            }
+        }
+    }
+    
+    return chemistryResults;
+}
 
 // ==================== SOCKET.IO MULTIPLAYER ====================
 
@@ -234,7 +278,6 @@ io.on('connection', (socket) => {
             return;
         }
         
-        // Find and update player by old socket ID
         for (let i = 0; i < gameRoom.players.length; i++) {
             if (gameRoom.players[i].id === oldSocketId) {
                 console.log(`🔄 Updating ${gameRoom.players[i].name} ID from ${oldSocketId} to ${newSocketId}`);
@@ -247,7 +290,6 @@ io.on('connection', (socket) => {
             }
         }
         
-        // Update draft state if active
         if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
             for (let i = 0; i < gameRoom.draftState.players.length; i++) {
                 if (gameRoom.draftState.players[i].id === oldSocketId) {
@@ -262,129 +304,124 @@ io.on('connection', (socket) => {
 
     // Start the draft
     socket.on('startDraft', async (roomCode) => {
-    console.log('🎯🎯🎯 START DRAFT RECEIVED! 🎯🎯🎯');
-    console.log('Room code:', roomCode);
-    console.log('From socket ID:', socket.id);
-    
-    const gameRoom = gameRooms.get(roomCode);
-    console.log('Game room found?', !!gameRoom);
-    
-    if (!gameRoom) {
-        console.log('❌ Game room not found!');
-        socket.emit('startDraftError', 'Game room not found');
-        return;
-    }
-    
-    console.log('Room host ID:', gameRoom.host);
-    console.log('Requestor ID:', socket.id);
-    console.log('Is host?', gameRoom.host === socket.id);
-    
-    if (gameRoom.host !== socket.id) {
-        console.log('❌ Not host!');
-        socket.emit('startDraftError', 'Only the host can start the draft');
-        return;
-    }
-    
-    const allReady = gameRoom.players.every(p => p.isReady === true);
-    const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
-    console.log('All players ready?', allReady);
-    console.log('Correct player count?', correctCount);
-    console.log('Expected players:', gameRoom.config.numPlayers);
-    console.log('Actual players:', gameRoom.players.length);
-    
-    if (!allReady || !correctCount) {
-        console.log('❌ Not all players ready!');
-        socket.emit('startDraftError', 'Not all players are ready');
-        return;
-    }
-    
-    const category = gameRoom.config.category;
-    console.log('Loading items for category:', category);
-    
-    try {
-        const items = await loadGameItems(category);
-        console.log('Items loaded:', items.length);
+        console.log(`🎯 START DRAFT requested for room: ${roomCode} by ${socket.id}`);
         
-        if (!items || items.length === 0) {
-            socket.emit('startDraftError', `No items found for category "${category}"`);
+        const gameRoom = gameRooms.get(roomCode);
+        
+        if (!gameRoom) {
+            socket.emit('startDraftError', 'Game room not found');
             return;
         }
         
-        const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
-        gameRoom.gameState = 'drafting';
-        gameRoom.draftState = draftState;
+        if (gameRoom.host !== socket.id) {
+            socket.emit('startDraftError', 'Only the host can start the draft');
+            return;
+        }
         
-        console.log('📢 Broadcasting draftStarted to room:', roomCode);
-        console.log('Room has sockets:', io.sockets.adapter.rooms.get(roomCode));
+        const allReady = gameRoom.players.every(p => p.isReady === true);
+        const correctCount = gameRoom.players.length === gameRoom.config.numPlayers;
         
-        io.to(roomCode).emit('draftStarted', draftState);
+        if (!allReady || !correctCount) {
+            socket.emit('startDraftError', 'Not all players are ready');
+            return;
+        }
         
-        const firstPlayer = draftState.currentPlayer;
-        console.log('📢 First player:', firstPlayer.name, firstPlayer.id);
-        console.log('📢 Broadcasting turnChange to room:', roomCode);
+        const category = gameRoom.config.category;
         
-        io.to(roomCode).emit('turnChange', {
-            playerId: firstPlayer.id,
-            playerName: firstPlayer.name,
-            timeRemaining: draftState.timerSeconds
-        });
+        if (!category) {
+            socket.emit('startDraftError', 'No category selected');
+            return;
+        }
         
-        console.log('✅ Draft started successfully!');
-        
-    } catch (error) {
-        console.error('Error:', error);
-        socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
-    }
-});
+        try {
+            const items = await loadGameItems(category);
+            
+            if (!items || items.length === 0) {
+                socket.emit('startDraftError', `No items found for category "${category}"`);
+                return;
+            }
+            
+            const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
+            gameRoom.gameState = 'drafting';
+            gameRoom.draftState = draftState;
+            
+            console.log(`📢 Broadcasting draftStarted to room: ${roomCode}`);
+            io.to(roomCode).emit('draftStarted', draftState);
+            
+            const firstPlayer = draftState.currentPlayer;
+            console.log(`📢 First player: ${firstPlayer.name}`);
+            console.log(`📢 Broadcasting turnChange to room: ${roomCode}`);
+            
+            io.to(roomCode).emit('turnChange', {
+                playerId: firstPlayer.id,
+                playerName: firstPlayer.name,
+                timeRemaining: draftState.timerSeconds
+            });
+            
+            console.log(`✅ Draft started successfully`);
+            
+        } catch (error) {
+            console.error('Error:', error);
+            socket.emit('startDraftError', `Failed to load draft items: ${error.message}`);
+        }
+    });
 
     // Re-join room (for draft page)
     socket.on('joinGameRoom', (roomCode) => {
-    console.log(`🔄 Player ${socket.id} rejoining room ${roomCode}`);
-    const gameRoom = gameRooms.get(roomCode);
-    
-    if (gameRoom) {
-        // Force join the room
-        socket.join(roomCode);
-        console.log(`✅ Player ${socket.id} joined room ${roomCode}`);
-        console.log(`Current sockets in room ${roomCode}:`, io.sockets.adapter.rooms.get(roomCode));
+        console.log(`🔄 Player ${socket.id} rejoining room ${roomCode}`);
+        const gameRoom = gameRooms.get(roomCode);
         
-        // Update host ID if this is the host
-        const hostPlayer = gameRoom.players.find(p => p.name === 'Host');
-        if (hostPlayer && hostPlayer.id !== socket.id) {
-            console.log(`👑 Updating host ID from ${hostPlayer.id} to ${socket.id}`);
-            hostPlayer.id = socket.id;
-            gameRoom.host = socket.id;
-        }
-        
-        // Send current state
-        if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
-            console.log('📢 Sending draft state to rejoining player');
-            socket.emit('draftStarted', gameRoom.draftState);
+        if (gameRoom) {
+            const hostPlayer = gameRoom.players.find(p => p.name === 'Host');
             
-            const currentPlayer = gameRoom.draftState.currentPlayer;
-            if (currentPlayer) {
-                console.log('📢 Sending turn info to rejoining player');
-                socket.emit('turnChange', {
-                    playerId: currentPlayer.id,
-                    playerName: currentPlayer.name,
-                    timeRemaining: gameRoom.draftState.timerSeconds
-                });
+            if (hostPlayer && hostPlayer.id !== socket.id) {
+                console.log(`👑 Updating host ID from ${hostPlayer.id} to ${socket.id}`);
+                hostPlayer.id = socket.id;
+                gameRoom.host = socket.id;
+                
+                if (gameRoom.draftState) {
+                    for (let i = 0; i < gameRoom.draftState.players.length; i++) {
+                        if (gameRoom.draftState.players[i].name === 'Host') {
+                            gameRoom.draftState.players[i].id = socket.id;
+                        }
+                    }
+                    if (gameRoom.draftState.currentPlayer && gameRoom.draftState.currentPlayer.name === 'Host') {
+                        gameRoom.draftState.currentPlayer.id = socket.id;
+                    }
+                }
+            }
+            
+            socket.join(roomCode);
+            console.log(`✅ Player joined room ${roomCode}`);
+            
+            if (gameRoom.draftState && gameRoom.gameState === 'drafting') {
+                console.log(`📢 Sending draft state to rejoining player`);
+                socket.emit('draftStarted', gameRoom.draftState);
+                
+                const currentPlayer = gameRoom.draftState.currentPlayer;
+                if (currentPlayer) {
+                    console.log(`📢 Sending turn info: ${currentPlayer.name} (${currentPlayer.id})`);
+                    socket.emit('turnChange', {
+                        playerId: currentPlayer.id,
+                        playerName: currentPlayer.name,
+                        timeRemaining: gameRoom.draftState.timerSeconds
+                    });
+                }
+            } else {
+                console.log(`📢 Sending player list (draft not started yet)`);
+                socket.emit('playerJoined', gameRoom.players);
             }
         } else {
-            console.log('📢 Sending player list (draft not started)');
-            socket.emit('playerJoined', gameRoom.players);
+            console.log(`❌ Room ${roomCode} not found`);
+            socket.emit('error', 'Game room not found');
         }
-    } else {
-        console.log(`❌ Room ${roomCode} not found`);
-        socket.emit('error', 'Game room not found');
-    }
-});
+    });
 
-// Make a pick during draft
-socket.on('makePick', (data) => {
-    const { roomCode, itemName } = data;
-    console.log(`📦 Pick: ${itemName} from ${socket.id}`);
-
+    // Make a pick during draft with chemistry tracking
+    socket.on('makePick', async (data) => {
+        const { roomCode, itemName } = data;
+        console.log(`📦 Pick: ${itemName} from ${socket.id}`);
+        
         const gameRoom = gameRooms.get(roomCode);
         
         if (!gameRoom || gameRoom.gameState !== 'drafting') {
@@ -414,21 +451,59 @@ socket.on('makePick', (data) => {
         }
         
         const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
-        const score = scoreItem ? scoreItem.score : 0;
+        let baseScore = scoreItem ? scoreItem.score : 0;
+        
+        const playerExistingItems = draft.playersItems[currentPick.playerIndex];
+        const chemistryResults = await checkChemistry(draft.category, playerExistingItems, itemName);
+        
+        const draftSessionId = roomCode;
+        if (!draftChemistryData.has(draftSessionId)) {
+            draftChemistryData.set(draftSessionId, {});
+        }
+        const sessionChemistry = draftChemistryData.get(draftSessionId);
+        if (!sessionChemistry[currentPick.playerIndex]) {
+            sessionChemistry[currentPick.playerIndex] = [];
+        }
+        
+        for (const synergy of chemistryResults.synergies) {
+            sessionChemistry[currentPick.playerIndex].push({
+                type: 'synergy',
+                text: `${synergy.comboName || 'Synergy'} with ${synergy.with}`,
+                with: synergy.with,
+                points: synergy.points
+            });
+        }
+        for (const conflict of chemistryResults.conflicts) {
+            sessionChemistry[currentPick.playerIndex].push({
+                type: 'conflict',
+                text: `${conflict.comboName || 'Conflict'} with ${conflict.with}`,
+                with: conflict.with,
+                points: conflict.points
+            });
+        }
+        
+        const totalScore = baseScore + chemistryResults.totalEffect;
         
         draft.availableItems.splice(itemIndex, 1);
-        draft.playersItems[currentPick.playerIndex].push({ name: itemName, score: score });
+        draft.playersItems[currentPick.playerIndex].push({
+            name: itemName,
+            score: totalScore,
+            baseScore: baseScore,
+            chemistryBonus: chemistryResults.totalEffect,
+            chemistryDetails: chemistryResults
+        });
         
         io.to(roomCode).emit('pickMade', {
             playerId: socket.id,
             playerName: currentPlayer.name,
-            item: itemName
+            item: itemName,
+            score: totalScore
         });
         
         draft.currentPickIndex++;
         
         if (draft.currentPickIndex >= draft.draftOrder.length) {
-            const results = calculateResults(draft.players, draft.playersItems);
+            const results = calculateFinalResultsWithChemistry(draft, draftSessionId, sessionChemistry);
             io.to(roomCode).emit('draftComplete', results);
         } else {
             const nextPick = draft.draftOrder[draft.currentPickIndex];
@@ -463,6 +538,7 @@ socket.on('makePick', (data) => {
                 
                 if (gameRoom.players.length === 0) {
                     gameRooms.delete(roomCode);
+                    draftChemistryData.delete(roomCode);
                     console.log(`🗑️ Room ${roomCode} deleted`);
                 } else if (wasHost && gameRoom.players.length > 0) {
                     gameRoom.host = gameRoom.players[0].id;
@@ -531,70 +607,51 @@ function generateDraftOrder(numPlayers, numRounds, draftType) {
     return order;
 }
 
-// ==================== CHEMISTRY SYSTEM ====================
-
-// Function to check chemistry between items (stores results but doesn't affect scoring)
-async function checkChemistry(category, items, newItem) {
-    const tableName = category;
+function calculateFinalResultsWithChemistry(draft, draftSessionId, chemistryData) {
+    const results = [];
     
-    const chemistryResults = {
-        synergies: [],
-        conflicts: [],
-        totalEffect: 0
-    };
-    
-    for (const existingItem of items) {
-        const result = await pgPool.query(`
-            SELECT effect_type, points, combo_name 
-            FROM item_synergies 
-            WHERE table_name = $1 
-            AND ((item1_name = $2 AND item2_name = $3) OR (item1_name = $3 AND item2_name = $2))
-        `, [tableName, existingItem.name, newItem]);
+    for (let i = 0; i < draft.players.length; i++) {
+        let totalScore = 0;
+        let bestPick = null;
+        let worstPick = null;
         
-        if (result.rows.length > 0) {
-            const chem = result.rows[0];
-            if (chem.effect_type === 'synergy') {
-                chemistryResults.synergies.push({
-                    with: existingItem.name,
-                    points: chem.points,
-                    comboName: chem.combo_name
-                });
-                chemistryResults.totalEffect += chem.points;
-            } else if (chem.effect_type === 'conflict') {
-                chemistryResults.conflicts.push({
-                    with: existingItem.name,
-                    points: chem.points,
-                    comboName: chem.combo_name
-                });
-                chemistryResults.totalEffect += chem.points;
+        for (const item of draft.playersItems[i]) {
+            totalScore += item.score;
+            
+            if (!bestPick || (item.baseScore > bestPick.score)) {
+                bestPick = { name: item.name, score: item.baseScore };
+            }
+            if (!worstPick || (item.baseScore < worstPick.score)) {
+                worstPick = { name: item.name, score: item.baseScore };
             }
         }
+        
+        const chemistryMoves = chemistryData ? (chemistryData[i] || []) : [];
+        
+        results.push({
+            playerIndex: i,
+            playerName: draft.players[i].name,
+            totalScore: totalScore,
+            bestPick: bestPick,
+            worstPick: worstPick,
+            chemistryMoves: chemistryMoves,
+            items: draft.playersItems[i]
+        });
     }
     
-    return chemistryResults;
-}
-
-// Function to find best and worst picks for a player
-function findBestAndWorstPicks(items) {
-    if (!items || items.length === 0) {
-        return { best: null, worst: null };
-    }
+    results.sort((a, b) => b.totalScore - a.totalScore);
     
-    // Items already have scores from the database
-    const sorted = [...items].sort((a, b) => (b.score || 0) - (a.score || 0));
-    return {
-        best: sorted[0],
-        worst: sorted[sorted.length - 1]
-    };
-}
-
-function calculateResults(players, playersItems) {
-    return players.map((player, index) => ({
-        playerId: player.id,
-        playerName: player.name,
-        totalScore: playersItems[index].reduce((sum, item) => sum + (item.score || 0), 0),
-        items: playersItems[index]
-    })).sort((a, b) => b.totalScore - a.totalScore);
+    let currentPlace = 1;
+    let previousScore = null;
+    results.forEach((player, index) => {
+        if (previousScore !== null && player.totalScore < previousScore) {
+            currentPlace = index + 1;
+        }
+        player.place = currentPlace;
+        previousScore = player.totalScore;
+    });
+    
+    return results;
 }
 
 // Start server
