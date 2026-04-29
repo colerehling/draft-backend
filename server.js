@@ -53,7 +53,7 @@ app.use(express.json());
 
 // Store active game rooms
 const gameRooms = new Map();
-const draftChemistryData = new Map(); // Store chemistry for each draft session
+const draftChemistryData = new Map();
 
 // ==================== API ROUTES ====================
 
@@ -131,6 +131,8 @@ app.get('/', (req, res) => {
         endpoints: {
             categories: 'GET /api/categories',
             itemsWithScores: 'GET /api/items/:category/with-scores',
+            dynamicTemplates: 'GET /api/dynamic-templates',
+            dynamicItems: 'GET /api/dynamic-items/:templateName/:category',
             health: 'GET /api/health'
         },
         websocket: 'Socket.IO enabled for multiplayer'
@@ -181,7 +183,6 @@ app.get('/api/dynamic-template/:templateName/slots', async (req, res) => {
 app.get('/api/dynamic-items/:templateName/:category', async (req, res) => {
     const { templateName, category } = req.params;
     try {
-        // Get the table name from the template
         const templateResult = await pgPool.query(
             'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
             [templateName]
@@ -193,7 +194,6 @@ app.get('/api/dynamic-items/:templateName/:category', async (req, res) => {
         
         const tableName = templateResult.rows[0].table_name;
         
-        // Query items from the specific table
         const items = await pgPool.query(
             `SELECT item_name, score FROM "${tableName}" WHERE category = $1 ORDER BY item_name`,
             [category]
@@ -225,7 +225,6 @@ app.get('/api/dynamic-all-items/:templateName', async (req, res) => {
             `SELECT item_name, category, score FROM "${tableName}" ORDER BY category, item_name`
         );
         
-        // Group by category
         const groupedItems = {};
         items.rows.forEach(item => {
             if (!groupedItems[item.category]) {
@@ -287,6 +286,157 @@ async function checkChemistry(category, items, newItem) {
     return chemistryResults;
 }
 
+// ==================== HELPER FUNCTIONS ====================
+
+function generateRoomCode() {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) {
+        code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+}
+
+async function loadGameItems(category) {
+    if (!category) throw new Error('Category is required');
+    
+    const safeCategory = category.replace(/[^a-z_]/gi, '');
+    const result = await pgPool.query(
+        `SELECT item_name, CAST(COALESCE(score, 0) AS FLOAT) as score FROM "${safeCategory}" ORDER BY item_name`
+    );
+    
+    return result.rows;
+}
+
+function generateDraftOrder(numPlayers, numRounds, draftType) {
+    const order = [];
+    for (let round = 1; round <= numRounds; round++) {
+        if (draftType === 'snake' && round % 2 === 0) {
+            for (let i = numPlayers - 1; i >= 0; i--) {
+                order.push({ playerIndex: i, round: round });
+            }
+        } else {
+            for (let i = 0; i < numPlayers; i++) {
+                order.push({ playerIndex: i, round: round });
+            }
+        }
+    }
+    return order;
+}
+
+function initializeDraftState(players, config, items) {
+    const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
+    
+    return {
+        players: players.map(p => ({ id: p.id, name: p.name })),
+        availableItems: items.map(i => i.item_name),
+        itemsWithScores: items,
+        playersItems: players.map(() => []),
+        draftOrder: draftOrder,
+        currentPickIndex: 0,
+        currentPlayer: players[draftOrder[0].playerIndex],
+        numRounds: config.numRounds,
+        timerSeconds: config.timerMinutes * 60,
+        category: config.category,
+        categoryName: config.categoryName || config.category,
+        draftType: config.draftType,
+        draftMode: 'simple'
+    };
+}
+
+function initializeDynamicDraftState(players, config, slots, slotItemsMap) {
+    const draftOrder = generateDraftOrder(players.length, slots.length, config.draftType);
+    
+    const availableItems = [];
+    const itemsWithScores = {};
+    
+    for (const slot of slots) {
+        const slotItems = slotItemsMap[slot.slot_name] || [];
+        slotItems.forEach(item => {
+            availableItems.push(item.item_name);
+            itemsWithScores[item.item_name] = item.score;
+        });
+    }
+    
+    return {
+        players: players.map(p => ({ id: p.id, name: p.name })),
+        availableItems: availableItems,
+        itemsWithScores: itemsWithScores,
+        playersItems: players.map(() => []),
+        draftOrder: draftOrder,
+        currentPickIndex: 0,
+        currentPlayer: players[draftOrder[0].playerIndex],
+        numRounds: slots.length,
+        timerSeconds: config.timerMinutes * 60,
+        draftMode: 'dynamic',
+        slots: slots,
+        slotItemsMap: slotItemsMap,
+        currentSlotIndex: 0,
+        templateName: config.templateName,
+        templateDisplayName: config.templateDisplayName
+    };
+}
+
+function calculateFinalResultsWithChemistry(draft, draftSessionId, chemistryData) {
+    console.log('Calculating final results with chemistry data:', chemistryData);
+    
+    const results = [];
+    
+    for (let i = 0; i < draft.players.length; i++) {
+        let totalScore = 0;
+        let bestPick = null;
+        let worstPick = null;
+        let playerChemistryMoves = [];
+        
+        if (chemistryData && chemistryData.has(i)) {
+            playerChemistryMoves = chemistryData.get(i);
+        }
+        
+        for (const item of draft.playersItems[i]) {
+            let itemScore = parseFloat(item.score) || 0;
+            totalScore += itemScore;
+            
+            const baseScore = parseFloat(item.baseScore) || 0;
+            if (!bestPick || baseScore > bestPick.score) {
+                bestPick = { name: item.name, score: baseScore };
+            }
+            if (!worstPick || baseScore < worstPick.score) {
+                worstPick = { name: item.name, score: baseScore };
+            }
+        }
+        
+        let chemistryTotal = 0;
+        for (const move of playerChemistryMoves) {
+            chemistryTotal += move.points || 0;
+        }
+        totalScore += chemistryTotal;
+        
+        results.push({
+            playerIndex: i,
+            playerName: draft.players[i].name,
+            totalScore: totalScore,
+            bestPick: bestPick,
+            worstPick: worstPick,
+            chemistryMoves: playerChemistryMoves,
+            items: draft.playersItems[i]
+        });
+    }
+    
+    results.sort((a, b) => b.totalScore - a.totalScore);
+    
+    let currentPlace = 1;
+    let previousScore = null;
+    results.forEach((player, index) => {
+        if (previousScore !== null && player.totalScore < previousScore) {
+            currentPlace = index + 1;
+        }
+        player.place = currentPlace;
+        previousScore = player.totalScore;
+    });
+    
+    return results;
+}
+
 // ==================== SOCKET.IO MULTIPLAYER ====================
 
 io.on('connection', (socket) => {
@@ -315,6 +465,13 @@ io.on('connection', (socket) => {
         socket.join(roomCode);
         
         console.log(`🎮 Game created: ${roomCode} by ${socket.id}`);
+        console.log(`Draft mode: ${gameConfig.draftMode || 'simple'}`);
+        if (gameConfig.draftMode === 'dynamic') {
+            console.log(`Template: ${gameConfig.templateName}`);
+        } else {
+            console.log(`Category: ${gameConfig.category}`);
+        }
+        console.log(`Draft order type: ${gameConfig.draftType || 'snake'}`);
         
         if (callback) callback({ success: true, roomCode: roomCode });
         io.to(roomCode).emit('playerJoined', gameRoom.players);
@@ -433,22 +590,66 @@ io.on('connection', (socket) => {
             return;
         }
         
-        const category = gameRoom.config.category;
-        
-        if (!category) {
-            socket.emit('startDraftError', 'No category selected');
-            return;
-        }
+        const draftMode = gameRoom.config.draftMode || 'simple';
         
         try {
-            const items = await loadGameItems(category);
+            let draftState;
             
-            if (!items || items.length === 0) {
-                socket.emit('startDraftError', `No items found for category "${category}"`);
-                return;
+            if (draftMode === 'simple') {
+                const category = gameRoom.config.category;
+                if (!category) {
+                    socket.emit('startDraftError', 'No category selected');
+                    return;
+                }
+                const items = await loadGameItems(category);
+                if (!items || items.length === 0) {
+                    socket.emit('startDraftError', `No items found for category "${category}"`);
+                    return;
+                }
+                draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
+            } else {
+                // Dynamic draft mode
+                const templateName = gameRoom.config.templateName;
+                if (!templateName) {
+                    socket.emit('startDraftError', 'No template selected');
+                    return;
+                }
+                
+                // Get template slots
+                const slotsResult = await pgPool.query(`
+                    SELECT slot_name, slot_order, description 
+                    FROM dynamic_draft_slots ds
+                    JOIN dynamic_draft_choices dc ON dc.id = ds.template_id
+                    WHERE dc.template_name = $1
+                    ORDER BY ds.slot_order
+                `, [templateName]);
+                
+                const slots = slotsResult.rows;
+                
+                if (slots.length === 0) {
+                    socket.emit('startDraftError', 'No slots found for this template');
+                    return;
+                }
+                
+                // Get table name and load items for each slot
+                const tableResult = await pgPool.query(
+                    'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
+                    [templateName]
+                );
+                const tableName = tableResult.rows[0].table_name;
+                
+                const slotItemsMap = {};
+                for (const slot of slots) {
+                    const itemsResult = await pgPool.query(
+                        `SELECT item_name, score FROM "${tableName}" WHERE category = $1 ORDER BY item_name`,
+                        [slot.slot_name]
+                    );
+                    slotItemsMap[slot.slot_name] = itemsResult.rows;
+                }
+                
+                draftState = initializeDynamicDraftState(gameRoom.players, gameRoom.config, slots, slotItemsMap);
             }
             
-            const draftState = initializeDraftState(gameRoom.players, gameRoom.config, items);
             gameRoom.gameState = 'drafting';
             gameRoom.draftState = draftState;
             
@@ -524,7 +725,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    // Make a pick during draft with proper numeric score calculation
+    // Make a pick during draft
     socket.on('makePick', async (data) => {
         const { roomCode, itemName } = data;
         console.log(`📦 Pick: ${itemName} from ${socket.id}`);
@@ -557,21 +758,12 @@ io.on('connection', (socket) => {
             return;
         }
         
-        // Get base score as number
         const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
         let baseScore = scoreItem ? parseFloat(scoreItem.score) : 0;
         
-        // Check chemistry with existing items
         const playerExistingItems = draft.playersItems[currentPick.playerIndex];
-        const chemistryResults = await checkChemistry(draft.category, playerExistingItems, itemName);
+        const chemistryResults = await checkChemistry(draft.category || draft.templateName, playerExistingItems, itemName);
         
-        // Calculate total score with chemistry (numeric addition)
-        const chemistryBonus = chemistryResults.totalEffect;
-        const totalScore = baseScore + chemistryBonus;
-        
-        console.log(`Item: ${itemName}, Base Score: ${baseScore}, Chemistry Bonus: ${chemistryBonus}, Total: ${totalScore}`);
-        
-        // Store chemistry data for results page
         const draftSessionId = roomCode;
         if (!draftChemistryData.has(draftSessionId)) {
             draftChemistryData.set(draftSessionId, new Map());
@@ -598,7 +790,9 @@ io.on('connection', (socket) => {
         }
         sessionChemistry.set(currentPick.playerIndex, playerChemistry);
         
-        // Remove item and add to player's picks with numeric scores
+        const chemistryBonus = chemistryResults.totalEffect;
+        const totalScore = baseScore + chemistryBonus;
+        
         draft.availableItems.splice(itemIndex, 1);
         draft.playersItems[currentPick.playerIndex].push({
             name: itemName,
@@ -608,7 +802,11 @@ io.on('connection', (socket) => {
             chemistryDetails: chemistryResults
         });
         
-        // Broadcast pick to all players
+        // Update current slot index for dynamic draft
+        if (draft.draftMode === 'dynamic' && draft.currentSlotIndex !== undefined) {
+            draft.currentSlotIndex++;
+        }
+        
         io.to(roomCode).emit('pickMade', {
             playerId: socket.id,
             playerName: currentPlayer.name,
@@ -619,7 +817,6 @@ io.on('connection', (socket) => {
         draft.currentPickIndex++;
         
         if (draft.currentPickIndex >= draft.draftOrder.length) {
-            // Calculate final results with proper numeric scores
             const results = calculateFinalResultsWithChemistry(draft, draftSessionId, sessionChemistry);
             io.to(roomCode).emit('draftComplete', results);
         } else {
@@ -666,136 +863,6 @@ io.on('connection', (socket) => {
         }
     });
 });
-
-// ==================== HELPER FUNCTIONS ====================
-
-function generateRoomCode() {
-    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789';
-    let code = '';
-    for (let i = 0; i < 6; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return code;
-}
-
-async function loadGameItems(category) {
-    if (!category) throw new Error('Category is required');
-    
-    const safeCategory = category.replace(/[^a-z_]/gi, '');
-    const result = await pgPool.query(
-        `SELECT item_name, CAST(COALESCE(score, 0) AS FLOAT) as score FROM "${safeCategory}" ORDER BY item_name`
-    );
-    
-    return result.rows;
-}
-
-function initializeDraftState(players, config, items) {
-    const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
-    
-    return {
-        players: players.map(p => ({ id: p.id, name: p.name })),
-        availableItems: items.map(i => i.item_name),
-        itemsWithScores: items,
-        playersItems: players.map(() => []),
-        draftOrder: draftOrder,
-        currentPickIndex: 0,
-        currentPlayer: players[draftOrder[0].playerIndex],
-        numRounds: config.numRounds,
-        timerSeconds: config.timerMinutes * 60,
-        category: config.category,
-        categoryName: config.categoryName || config.category,
-        draftType: config.draftType
-    };
-}
-
-function generateDraftOrder(numPlayers, numRounds, draftType) {
-    const order = [];
-    for (let round = 1; round <= numRounds; round++) {
-        if (draftType === 'snake' && round % 2 === 0) {
-            for (let i = numPlayers - 1; i >= 0; i--) {
-                order.push({ playerIndex: i, round: round });
-            }
-        } else {
-            for (let i = 0; i < numPlayers; i++) {
-                order.push({ playerIndex: i, round: round });
-            }
-        }
-    }
-    return order;
-}
-
-function calculateFinalResultsWithChemistry(draft, draftSessionId, chemistryData) {
-    console.log('Calculating final results with chemistry data:', chemistryData);
-    
-    const results = [];
-    
-    for (let i = 0; i < draft.players.length; i++) {
-        let totalScore = 0;
-        let bestPick = null;
-        let worstPick = null;
-        let playerChemistryMoves = [];
-        
-        // Get chemistry moves for this player
-        if (chemistryData && chemistryData.has(i)) {
-            playerChemistryMoves = chemistryData.get(i);
-            console.log(`Player ${draft.players[i].name} chemistry moves:`, playerChemistryMoves);
-        }
-        
-        // Calculate total score by adding numbers (not concatenating)
-        for (const item of draft.playersItems[i]) {
-            let itemScore = parseFloat(item.score) || 0;
-            totalScore += itemScore;
-            
-            console.log(`Item: ${item.name}, Score: ${itemScore}, Running Total: ${totalScore}`);
-            
-            // Find best and worst picks by base score
-            const baseScore = parseFloat(item.baseScore) || 0;
-            if (!bestPick || baseScore > bestPick.score) {
-                bestPick = { name: item.name, score: baseScore };
-            }
-            if (!worstPick || baseScore < worstPick.score) {
-                worstPick = { name: item.name, score: baseScore };
-            }
-        }
-        
-        // Add chemistry points to total score
-        let chemistryTotal = 0;
-        for (const move of playerChemistryMoves) {
-            chemistryTotal += move.points || 0;
-        }
-        totalScore += chemistryTotal;
-        
-        console.log(`Player ${draft.players[i].name} - Items Total: ${totalScore - chemistryTotal}, Chemistry: ${chemistryTotal}, Final: ${totalScore}`);
-        
-        results.push({
-            playerIndex: i,
-            playerName: draft.players[i].name,
-            totalScore: totalScore,
-            bestPick: bestPick,
-            worstPick: worstPick,
-            chemistryMoves: playerChemistryMoves,
-            items: draft.playersItems[i]
-        });
-    }
-    
-    // Sort by total score (highest first)
-    results.sort((a, b) => b.totalScore - a.totalScore);
-    
-    // Add place
-    let currentPlace = 1;
-    let previousScore = null;
-    results.forEach((player, index) => {
-        if (previousScore !== null && player.totalScore < previousScore) {
-            currentPlace = index + 1;
-        }
-        player.place = currentPlace;
-        previousScore = player.totalScore;
-    });
-    
-    console.log('Final results sorted by score:', results.map(r => ({ name: r.playerName, score: r.totalScore, place: r.place })));
-    
-    return results;
-}
 
 // Start server
 server.listen(PORT, '0.0.0.0', () => {
