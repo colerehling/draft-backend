@@ -28,6 +28,19 @@ const io = socketIo(server, {
     allowEIO3: true
 });
 
+// Also update the Express CORS
+app.use(cors({
+    origin: [
+        'https://draftanything.vercel.app',
+        'https://draft-frontend.vercel.app',
+        'http://localhost:5500',
+        'http://localhost:3000',
+        'http://127.0.0.1:5500',
+        'http://127.0.0.1:3000'
+    ],
+    credentials: true
+}));
+
 const pgPool = new Pool({
     connectionString: process.env.NEON_DATABASE_URL,
     ssl: {
