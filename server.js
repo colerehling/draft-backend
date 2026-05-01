@@ -53,7 +53,6 @@ app.use(express.json());
 
 // Store active game rooms
 const gameRooms = new Map();
-const draftChemistryData = new Map();
 
 // ==================== SIMPLE DRAFT API ROUTES ====================
 
@@ -249,47 +248,6 @@ app.get('/', (req, res) => {
         websocket: 'Socket.IO enabled for multiplayer'
     });
 });
-
-// ==================== CHEMISTRY FUNCTIONS ====================
-
-async function checkChemistry(category, items, newItem) {
-    const tableName = category;
-    const chemistryResults = {
-        synergies: [],
-        conflicts: [],
-        totalEffect: 0
-    };
-    
-    for (const existingItem of items) {
-        const result = await pgPool.query(`
-            SELECT effect_type, points, combo_name 
-            FROM item_synergies 
-            WHERE table_name = $1 
-            AND ((item1_name = $2 AND item2_name = $3) OR (item1_name = $3 AND item2_name = $2))
-        `, [tableName, existingItem.name, newItem]);
-        
-        if (result.rows.length > 0) {
-            const chem = result.rows[0];
-            if (chem.effect_type === 'synergy') {
-                chemistryResults.synergies.push({
-                    with: existingItem.name,
-                    points: chem.points,
-                    comboName: chem.combo_name
-                });
-                chemistryResults.totalEffect += chem.points;
-            } else if (chem.effect_type === 'conflict') {
-                chemistryResults.conflicts.push({
-                    with: existingItem.name,
-                    points: chem.points,
-                    comboName: chem.combo_name
-                });
-                chemistryResults.totalEffect += chem.points;
-            }
-        }
-    }
-    
-    return chemistryResults;
-}
 
 // ==================== HELPER FUNCTIONS ====================
 
@@ -526,6 +484,19 @@ io.on('connection', (socket) => {
         }
     });
 
+    // Get room info for joining players (for dynamic draft)
+    socket.on('getRoomInfo', (roomCode) => {
+        const gameRoom = gameRooms.get(roomCode);
+        console.log(`Getting room info for ${roomCode}`);
+        if (gameRoom && gameRoom.config.draftMode === 'dynamic') {
+            socket.emit('roomInfo', {
+                templateName: gameRoom.config.templateName,
+                templateDisplayName: gameRoom.config.templateDisplayName
+            });
+            console.log(`Sent room info: ${gameRoom.config.templateName}`);
+        }
+    });
+
     socket.on('startDraft', async (roomCode) => {
         console.log(`🎯 START DRAFT requested for room: ${roomCode}`);
         
@@ -679,7 +650,7 @@ io.on('connection', (socket) => {
             return;
         }
         
-        // Handle both array (simple draft) and object (dynamic draft) for itemsWithScores
+        // Handle both array and object for itemsWithScores
         let baseScore = 0;
         if (Array.isArray(draft.itemsWithScores)) {
             const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
