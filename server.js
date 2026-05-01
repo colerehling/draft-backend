@@ -469,6 +469,18 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('getTemplateInfo', (roomCode, callback) => {
+        const gameRoom = gameRooms.get(roomCode);
+        if (gameRoom && gameRoom.config.draftMode === 'dynamic') {
+            callback({
+                templateName: gameRoom.config.templateName,
+                templateDisplayName: gameRoom.config.templateDisplayName
+            });
+        } else {
+            callback(null);
+        }
+    });     
+
     socket.on('syncPlayerId', (data) => {
         const { roomCode, oldSocketId, newSocketId } = data;
         const gameRoom = gameRooms.get(roomCode);
