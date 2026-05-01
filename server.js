@@ -111,14 +111,10 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
 app.get('/api/dynamic-templates', async (req, res) => {
     try {
         const templates = await pgPool.query(`
-            SELECT ddc.*, 
-                   COALESCE(
-                       (SELECT json_agg(json_build_object('slot_name', dds.slot_name, 'slot_order', dds.slot_order, 'description', dds.description) ORDER BY dds.slot_order)
-                        FROM dynamic_draft_slots dds WHERE dds.template_id = ddc.id
-                   ), '[]'::json) as slots
-            FROM dynamic_draft_choices ddc
-            WHERE ddc.is_active = true
-            ORDER BY ddc.id
+            SELECT id, template_name, display_name, description, icon, total_rounds, is_active
+            FROM dynamic_draft_choices 
+            WHERE is_active = true
+            ORDER BY id
         `);
         res.json({ success: true, templates: templates.rows });
     } catch (error) {
@@ -127,57 +123,12 @@ app.get('/api/dynamic-templates', async (req, res) => {
     }
 });
 
-// Get slots for a specific template
-app.get('/api/dynamic-template/:templateName/slots', async (req, res) => {
-    const { templateName } = req.params;
-    try {
-        const result = await pgPool.query(`
-            SELECT dds.slot_name, dds.slot_order, dds.description
-            FROM dynamic_draft_slots dds
-            JOIN dynamic_draft_choices ddc ON ddc.id = dds.template_id
-            WHERE ddc.template_name = $1
-            ORDER BY dds.slot_order
-        `, [templateName]);
-        res.json({ success: true, slots: result.rows });
-    } catch (error) {
-        console.error('Error fetching template slots:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Get items for a specific template and category (slot)
-app.get('/api/dynamic-items/:templateName/:category', async (req, res) => {
-    const { templateName, category } = req.params;
-    try {
-        const templateResult = await pgPool.query(
-            'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
-            [templateName]
-        );
-        
-        if (templateResult.rows.length === 0) {
-            return res.status(404).json({ success: false, error: 'Template not found' });
-        }
-        
-        const tableName = templateResult.rows[0].table_name;
-        
-        const items = await pgPool.query(
-            `SELECT item_name, score FROM "${tableName}" WHERE category = $1 ORDER BY item_name`,
-            [category]
-        );
-        
-        res.json({ success: true, items: items.rows, category: category });
-    } catch (error) {
-        console.error('Error fetching dynamic items:', error);
-        res.status(500).json({ success: false, error: error.message });
-    }
-});
-
-// Get all items for a template grouped by category
+// Get all items for a template (simple list, no slots)
 app.get('/api/dynamic-all-items/:templateName', async (req, res) => {
     const { templateName } = req.params;
     try {
         const templateResult = await pgPool.query(
-            'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
+            'SELECT table_name, total_rounds FROM dynamic_draft_choices WHERE template_name = $1',
             [templateName]
         );
         
@@ -186,25 +137,20 @@ app.get('/api/dynamic-all-items/:templateName', async (req, res) => {
         }
         
         const tableName = templateResult.rows[0].table_name;
+        const totalRounds = templateResult.rows[0].total_rounds;
         
+        // Get all items from the template's table
         const items = await pgPool.query(
-            `SELECT item_name, category, score FROM "${tableName}" ORDER BY category, item_name`
+            `SELECT item_name, score FROM "${tableName}" ORDER BY item_name`
         );
         
-        const groupedItems = {};
-        items.rows.forEach(item => {
-            if (!groupedItems[item.category]) {
-                groupedItems[item.category] = [];
-            }
-            groupedItems[item.category].push({
-                item_name: item.item_name,
-                score: item.score
-            });
+        res.json({ 
+            success: true, 
+            items: items.rows,
+            totalRounds: totalRounds
         });
-        
-        res.json({ success: true, items: groupedItems });
     } catch (error) {
-        console.error('Error fetching all dynamic items:', error);
+        console.error('Error fetching dynamic items:', error);
         res.status(500).json({ success: false, error: error.message });
     }
 });
@@ -240,8 +186,7 @@ app.get('/', (req, res) => {
             },
             dynamic: {
                 templates: 'GET /api/dynamic-templates',
-                slots: 'GET /api/dynamic-template/:templateName/slots',
-                items: 'GET /api/dynamic-items/:templateName/:category'
+                items: 'GET /api/dynamic-all-items/:templateName'
             },
             health: 'GET /api/health'
         },
@@ -269,6 +214,28 @@ async function loadGameItems(category) {
     );
     
     return result.rows;
+}
+
+async function loadDynamicGameItems(templateName) {
+    if (!templateName) throw new Error('Template name is required');
+    
+    const templateResult = await pgPool.query(
+        'SELECT table_name, total_rounds FROM dynamic_draft_choices WHERE template_name = $1',
+        [templateName]
+    );
+    
+    if (templateResult.rows.length === 0) {
+        throw new Error('Template not found');
+    }
+    
+    const tableName = templateResult.rows[0].table_name;
+    const totalRounds = templateResult.rows[0].total_rounds;
+    
+    const result = await pgPool.query(
+        `SELECT item_name, CAST(COALESCE(score, 0) AS FLOAT) as score FROM "${tableName}" ORDER BY item_name`
+    );
+    
+    return { items: result.rows, totalRounds: totalRounds };
 }
 
 function generateDraftOrder(numPlayers, numRounds, draftType) {
@@ -307,37 +274,23 @@ function initializeDraftState(players, config, items) {
     };
 }
 
-function initializeDynamicDraftState(players, config, slots, slotItemsMap) {
-    const draftOrder = generateDraftOrder(players.length, slots.length, config.draftType);
-    
-    const availableItems = [];
-    const itemsWithScores = {};
-    
-    for (const slot of slots) {
-        const slotItems = slotItemsMap[slot.slot_name] || [];
-        slotItems.forEach(item => {
-            availableItems.push(item.item_name);
-            itemsWithScores[item.item_name] = item.score;
-        });
-    }
+function initializeDynamicDraftState(players, config, items, totalRounds) {
+    const draftOrder = generateDraftOrder(players.length, totalRounds, config.draftType);
     
     return {
         players: players.map(p => ({ id: p.id, name: p.name })),
-        availableItems: availableItems,
-        itemsWithScores: itemsWithScores,
+        availableItems: items.map(i => i.item_name),
+        itemsWithScores: items,
         playersItems: players.map(() => []),
         draftOrder: draftOrder,
         currentPickIndex: 0,
         currentPlayer: players[draftOrder[0].playerIndex],
-        numRounds: slots.length,
+        numRounds: totalRounds,
         timerSeconds: config.timerMinutes * 60,
-        draftMode: 'dynamic',
-        slots: slots,
-        slotItemsMap: slotItemsMap,
-        currentSlotIndex: 0,
         templateName: config.templateName,
-        templateDisplayName: config.templateDisplayName,
-        draftType: config.draftType
+        categoryName: config.templateDisplayName,
+        draftType: config.draftType,
+        draftMode: 'dynamic'
     };
 }
 
@@ -479,7 +432,7 @@ io.on('connection', (socket) => {
         } else {
             callback(null);
         }
-    });     
+    });
 
     socket.on('syncPlayerId', (data) => {
         const { roomCode, oldSocketId, newSocketId } = data;
@@ -493,19 +446,6 @@ io.on('connection', (socket) => {
                 if (gameRoom.host === oldSocketId) gameRoom.host = newSocketId;
                 break;
             }
-        }
-    });
-
-    // Get room info for joining players (for dynamic draft)
-    socket.on('getRoomInfo', (roomCode) => {
-        const gameRoom = gameRooms.get(roomCode);
-        console.log(`Getting room info for ${roomCode}`);
-        if (gameRoom && gameRoom.config.draftMode === 'dynamic') {
-            socket.emit('roomInfo', {
-                templateName: gameRoom.config.templateName,
-                templateDisplayName: gameRoom.config.templateDisplayName
-            });
-            console.log(`Sent room info: ${gameRoom.config.templateName}`);
         }
     });
 
@@ -554,37 +494,13 @@ io.on('connection', (socket) => {
                     return;
                 }
                 
-                const slotsResult = await pgPool.query(`
-                    SELECT ds.slot_name, ds.slot_order, ds.description 
-                    FROM dynamic_draft_slots ds
-                    INNER JOIN dynamic_draft_choices dc ON dc.id = ds.template_id
-                    WHERE dc.template_name = $1
-                    ORDER BY ds.slot_order
-                `, [templateName]);
-                
-                const slots = slotsResult.rows;
-                if (slots.length === 0) {
-                    socket.emit('startDraftError', 'No slots found for this template');
+                const { items, totalRounds } = await loadDynamicGameItems(templateName);
+                if (!items || items.length === 0) {
+                    socket.emit('startDraftError', `No items found for template "${templateName}"`);
                     return;
                 }
                 
-                const tableResult = await pgPool.query(
-                    'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
-                    [templateName]
-                );
-                
-                const tableName = tableResult.rows[0].table_name;
-                const slotItemsMap = {};
-                
-                for (const slot of slots) {
-                    const itemsResult = await pgPool.query(
-                        `SELECT item_name, score FROM "${tableName}" WHERE category = $1 ORDER BY item_name`,
-                        [slot.slot_name]
-                    );
-                    slotItemsMap[slot.slot_name] = itemsResult.rows;
-                }
-                
-                draftState = initializeDynamicDraftState(gameRoom.players, gameRoom.config, slots, slotItemsMap);
+                draftState = initializeDynamicDraftState(gameRoom.players, gameRoom.config, items, totalRounds);
             }
             
             gameRoom.gameState = 'drafting';
@@ -662,13 +578,11 @@ io.on('connection', (socket) => {
             return;
         }
         
-        // Handle both array and object for itemsWithScores
+        // Handle itemsWithScores (array for simple draft)
         let baseScore = 0;
         if (Array.isArray(draft.itemsWithScores)) {
             const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
             baseScore = scoreItem ? parseFloat(scoreItem.score) : 0;
-        } else if (draft.itemsWithScores && typeof draft.itemsWithScores === 'object') {
-            baseScore = draft.itemsWithScores[itemName] || 0;
         }
         
         draft.availableItems.splice(itemIndex, 1);
