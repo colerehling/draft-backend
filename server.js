@@ -496,9 +496,20 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('gameData', (data) => {
+    // Broadcast game data to all players (for dynamic draft)
+    socket.on('broadcastGameData', (data) => {
         const { roomCode, gameData } = data;
+        console.log(`📡 Broadcasting game data to room ${roomCode}`);
         socket.to(roomCode).emit('gameData', gameData);
+    });
+
+    // Handle request for game data from joiners
+    socket.on('requestGameData', (roomCode) => {
+        const gameRoom = gameRooms.get(roomCode);
+        console.log(`📡 Joiner requested game data for room ${roomCode}`);
+        if (gameRoom && gameRoom.host === socket.id) {
+            console.log(`👑 Host confirmed for room ${roomCode}`);
+        }
     });
 
     socket.on('startDraft', async (roomCode) => {
@@ -688,21 +699,6 @@ io.on('connection', (socket) => {
             }
         }
     });
-});
-
-// Broadcast game data to all players
-socket.on('broadcastGameData', (data) => {
-    const { roomCode, gameData } = data;
-    socket.to(roomCode).emit('gameData', gameData);
-});
-
-// Handle request for game data from joiners
-socket.on('requestGameData', (roomCode) => {
-    const gameRoom = gameRooms.get(roomCode);
-    if (gameRoom && gameRoom.host === socket.id) {
-        // This is the host - they'll send data via broadcastGameData
-        console.log('Joiner requested game data from host');
-    }
 });
 
 // Start server
