@@ -649,6 +649,7 @@ io.on('connection', (socket) => {
 
     socket.on('makePick', async (data) => {
         const { roomCode, itemName } = data;
+        console.log(`📦 Pick: ${itemName} from ${socket.id}`);
         
         const gameRoom = gameRooms.get(roomCode);
         
@@ -678,8 +679,14 @@ io.on('connection', (socket) => {
             return;
         }
         
-        const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
-        let baseScore = scoreItem ? parseFloat(scoreItem.score) : 0;
+        // Handle both array (simple draft) and object (dynamic draft) for itemsWithScores
+        let baseScore = 0;
+        if (Array.isArray(draft.itemsWithScores)) {
+            const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
+            baseScore = scoreItem ? parseFloat(scoreItem.score) : 0;
+        } else if (draft.itemsWithScores && typeof draft.itemsWithScores === 'object') {
+            baseScore = draft.itemsWithScores[itemName] || 0;
+        }
         
         draft.availableItems.splice(itemIndex, 1);
         draft.playersItems[currentPick.playerIndex].push({
