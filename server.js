@@ -28,19 +28,6 @@ const io = socketIo(server, {
     allowEIO3: true
 });
 
-// Also update the Express CORS
-app.use(cors({
-    origin: [
-        'https://draftanything.vercel.app',
-        'https://draft-frontend.vercel.app',
-        'http://localhost:5500',
-        'http://localhost:3000',
-        'http://127.0.0.1:5500',
-        'http://127.0.0.1:3000'
-    ],
-    credentials: true
-}));
-
 const pgPool = new Pool({
     connectionString: process.env.NEON_DATABASE_URL,
     ssl: {
@@ -68,7 +55,7 @@ app.use(express.json());
 const gameRooms = new Map();
 const draftChemistryData = new Map();
 
-// ==================== API ROUTES ====================
+// ==================== SIMPLE DRAFT API ROUTES ====================
 
 app.get('/api/categories', async (req, res) => {
     try {
@@ -119,31 +106,9 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
     }
 });
 
-app.get('/api/health', async (req, res) => {
-    res.json({ 
-        status: 'healthy', 
-        timestamp: new Date().toISOString()
-    });
-});
+// ==================== DYNAMIC DRAFT API ROUTES ====================
 
-app.get('/', (req, res) => {
-    res.json({
-        name: 'Draft Game API',
-        version: '2.0.0',
-        status: 'running',
-        endpoints: {
-            categories: 'GET /api/categories',
-            itemsWithScores: 'GET /api/items/:category/with-scores',
-            dynamicTemplates: 'GET /api/dynamic-templates',
-            dynamicItems: 'GET /api/dynamic-items/:templateName/:category',
-            health: 'GET /api/health'
-        },
-        websocket: 'Socket.IO enabled for multiplayer'
-    });
-});
-
-// ==================== DYNAMIC DRAFT API ENDPOINTS ====================
-
+// Get all dynamic draft templates
 app.get('/api/dynamic-templates', async (req, res) => {
     try {
         const templates = await pgPool.query(`
@@ -163,6 +128,7 @@ app.get('/api/dynamic-templates', async (req, res) => {
     }
 });
 
+// Get slots for a specific template
 app.get('/api/dynamic-template/:templateName/slots', async (req, res) => {
     const { templateName } = req.params;
     try {
@@ -180,6 +146,7 @@ app.get('/api/dynamic-template/:templateName/slots', async (req, res) => {
     }
 });
 
+// Get items for a specific template and category (slot)
 app.get('/api/dynamic-items/:templateName/:category', async (req, res) => {
     const { templateName, category } = req.params;
     try {
@@ -204,6 +171,83 @@ app.get('/api/dynamic-items/:templateName/:category', async (req, res) => {
         console.error('Error fetching dynamic items:', error);
         res.status(500).json({ success: false, error: error.message });
     }
+});
+
+// Get all items for a template grouped by category
+app.get('/api/dynamic-all-items/:templateName', async (req, res) => {
+    const { templateName } = req.params;
+    try {
+        const templateResult = await pgPool.query(
+            'SELECT table_name FROM dynamic_draft_choices WHERE template_name = $1',
+            [templateName]
+        );
+        
+        if (templateResult.rows.length === 0) {
+            return res.status(404).json({ success: false, error: 'Template not found' });
+        }
+        
+        const tableName = templateResult.rows[0].table_name;
+        
+        const items = await pgPool.query(
+            `SELECT item_name, category, score FROM "${tableName}" ORDER BY category, item_name`
+        );
+        
+        const groupedItems = {};
+        items.rows.forEach(item => {
+            if (!groupedItems[item.category]) {
+                groupedItems[item.category] = [];
+            }
+            groupedItems[item.category].push({
+                item_name: item.item_name,
+                score: item.score
+            });
+        });
+        
+        res.json({ success: true, items: groupedItems });
+    } catch (error) {
+        console.error('Error fetching all dynamic items:', error);
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+// ==================== HEALTH CHECK ====================
+
+app.get('/api/health', async (req, res) => {
+    try {
+        await pgPool.query('SELECT 1');
+        res.json({ 
+            status: 'healthy', 
+            database: 'connected',
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.status(500).json({ 
+            status: 'unhealthy', 
+            database: 'disconnected',
+            error: error.message 
+        });
+    }
+});
+
+app.get('/', (req, res) => {
+    res.json({
+        name: 'Draft Game API',
+        version: '2.0.0',
+        status: 'running',
+        endpoints: {
+            simple: {
+                categories: 'GET /api/categories',
+                items: 'GET /api/items/:category/with-scores'
+            },
+            dynamic: {
+                templates: 'GET /api/dynamic-templates',
+                slots: 'GET /api/dynamic-template/:templateName/slots',
+                items: 'GET /api/dynamic-items/:templateName/:category'
+            },
+            health: 'GET /api/health'
+        },
+        websocket: 'Socket.IO enabled for multiplayer'
+    });
 });
 
 // ==================== CHEMISTRY FUNCTIONS ====================
