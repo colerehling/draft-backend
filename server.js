@@ -690,6 +690,21 @@ io.on('connection', (socket) => {
     });
 });
 
+// Broadcast game data to all players
+socket.on('broadcastGameData', (data) => {
+    const { roomCode, gameData } = data;
+    socket.to(roomCode).emit('gameData', gameData);
+});
+
+// Handle request for game data from joiners
+socket.on('requestGameData', (roomCode) => {
+    const gameRoom = gameRooms.get(roomCode);
+    if (gameRoom && gameRoom.host === socket.id) {
+        // This is the host - they'll send data via broadcastGameData
+        console.log('Joiner requested game data from host');
+    }
+});
+
 // Start server
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`\n🚀 Server running on port ${PORT}`);
