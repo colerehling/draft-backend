@@ -109,7 +109,7 @@ app.get('/api/items/:category/with-scores', async (req, res) => {
 
 // ==================== DYNAMIC DRAFT API ROUTES ====================
 
-// Get all dynamic draft categories (templates)
+// Get all dynamic draft categories (templates) - table_name points to user-defined item table
 app.get('/api/dynamic-categories', async (req, res) => {
     try {
         const result = await pgPool.query(`
@@ -131,26 +131,16 @@ app.get('/api/dynamic-categories', async (req, res) => {
     }
 });
 
-// Get items for a dynamic draft template
+// Get items for a dynamic draft template - table_name is user-defined
 app.get('/api/dynamic-items/:tableName/with-scores', async (req, res) => {
     const { tableName } = req.params;
     
     try {
-        console.log(`Fetching items for dynamic template: ${tableName}`);
-        
-        // Check if the table exists in dynamic_draft_choices
-        const tableCheck = await pgPool.query(
-            'SELECT table_name FROM dynamic_draft_choices WHERE table_name = $1',
-            [tableName]
-        );
-        
-        if (tableCheck.rows.length === 0) {
-            return res.status(400).json({ success: false, error: 'Invalid template' });
-        }
-        
         const safeTable = tableName.replace(/[^a-z_]/gi, '');
         const result = await pgPool.query(
-            `SELECT item_name, CAST(COALESCE(score, 0) AS FLOAT) as score FROM "${safeTable}" ORDER BY item_name`
+            `SELECT item_name, category, CAST(COALESCE(score, 0) AS FLOAT) as score 
+             FROM "${safeTable}" 
+             ORDER BY item_name`
         );
         
         console.log(`Found ${result.rows.length} items in ${tableName}`);
@@ -269,7 +259,7 @@ function initializeDraftState(players, config, items) {
     };
 }
 
-function initializeDynamicDraftState(players, config, items, templateName) {
+function initializeDynamicDraftState(players, config, items) {
     const numRounds = config.numRounds || 5;
     const draftOrder = generateDraftOrder(players.length, numRounds, config.draftType);
     
@@ -283,7 +273,7 @@ function initializeDynamicDraftState(players, config, items, templateName) {
         currentPlayer: players[draftOrder[0].playerIndex],
         numRounds: numRounds,
         timerSeconds: config.timerMinutes * 60,
-        categoryName: config.templateDisplayName || templateName,
+        categoryName: config.templateDisplayName,
         draftType: config.draftType,
         draftMode: 'dynamic'
     };
@@ -481,7 +471,7 @@ io.on('connection', (socket) => {
                     socket.emit('startDraftError', `No items found for template "${tableName}"`);
                     return;
                 }
-                draftState = initializeDynamicDraftState(gameRoom.players, gameRoom.config, items, tableName);
+                draftState = initializeDynamicDraftState(gameRoom.players, gameRoom.config, items);
             }
             
             gameRoom.gameState = 'drafting';
@@ -559,7 +549,6 @@ io.on('connection', (socket) => {
             return;
         }
         
-        // Handle itemsWithScores (array for both simple and dynamic)
         let baseScore = 0;
         if (Array.isArray(draft.itemsWithScores)) {
             const scoreItem = draft.itemsWithScores.find(i => i.item_name === itemName);
