@@ -335,7 +335,7 @@ function initializeDynamicDraftState(players, config, items, positions) {
     
     return {
         players: players.map(p => ({ id: p.id, name: p.name })),
-        availableItems: items,
+        availableItems: items.map(i => i.item_name),
         itemsWithScores: items.reduce((acc, item) => {
             acc[item.item_name] = item.score;
             return acc;
@@ -505,11 +505,8 @@ io.on('connection', (socket) => {
 
     // Handle request for game data from joiners
     socket.on('requestGameData', (roomCode) => {
-        const gameRoom = gameRooms.get(roomCode);
         console.log(`📡 Joiner requested game data for room ${roomCode}`);
-        if (gameRoom && gameRoom.host === socket.id) {
-            console.log(`👑 Host confirmed for room ${roomCode}`);
-        }
+        // The host will send the data via broadcastGameData
     });
 
     socket.on('startDraft', async (roomCode) => {
@@ -616,8 +613,8 @@ io.on('connection', (socket) => {
     });
 
     socket.on('makePick', async (data) => {
-        const { roomCode, itemName, category, score } = data;
-        console.log(`📦 Pick: ${itemName} (${category}) from ${socket.id}`);
+        const { roomCode, itemName } = data;
+        console.log(`📦 Pick: ${itemName} from ${socket.id}`);
         
         const gameRoom = gameRooms.get(roomCode);
         
@@ -641,28 +638,40 @@ io.on('connection', (socket) => {
             return;
         }
         
-        const itemIndex = draft.availableItems.findIndex(i => i.item_name === itemName);
+        // Case-insensitive matching for item
+        const itemIndex = draft.availableItems.findIndex(
+            i => i.toLowerCase() === itemName.toLowerCase()
+        );
+        
         if (itemIndex === -1) {
+            console.log(`Item "${itemName}" not found. Available items:`, draft.availableItems);
             socket.emit('pickError', 'Item not available');
             return;
         }
         
-        const pickedItem = draft.availableItems[itemIndex];
-        const itemScore = pickedItem.score;
+        const actualItemName = draft.availableItems[itemIndex];
+        
+        // Get score from itemsWithScores
+        let baseScore = 0;
+        if (Array.isArray(draft.itemsWithScores)) {
+            const scoreItem = draft.itemsWithScores.find(i => i.item_name === actualItemName);
+            baseScore = scoreItem ? parseFloat(scoreItem.score) : 0;
+        } else if (draft.itemsWithScores && typeof draft.itemsWithScores === 'object') {
+            baseScore = draft.itemsWithScores[actualItemName] || 0;
+        }
         
         draft.availableItems.splice(itemIndex, 1);
         draft.playersItems[currentPick.playerIndex].push({
-            name: itemName,
-            category: category,
-            score: itemScore
+            name: actualItemName,
+            score: baseScore,
+            baseScore: baseScore
         });
         
         io.to(roomCode).emit('pickMade', {
             playerId: socket.id,
             playerName: currentPlayer.name,
-            item: itemName,
-            category: category,
-            score: itemScore
+            item: actualItemName,
+            score: baseScore
         });
         
         draft.currentPickIndex++;
