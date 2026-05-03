@@ -315,7 +315,7 @@ function initializeDraftState(players, config, items) {
     return {
         players: players.map(p => ({ id: p.id, name: p.name })),
         availableItems: items.map(i => i.item_name),
-        itemsWithScores: items,
+        itemsWithScores: items.map(i => ({ item_name: i.item_name, score: parseFloat(i.score) || 0 })),
         playersItems: players.map(() => []),
         draftOrder: draftOrder,
         currentPickIndex: 0,
@@ -333,13 +333,19 @@ function initializeDynamicDraftState(players, config, items, positions) {
     const numRounds = positions.length;
     const draftOrder = generateDraftOrder(players.length, numRounds, config.draftType);
     
+    // CRITICAL FIX: Store items in consistent array format
+    const itemsArrayWithScores = items.map(item => ({
+        item_name: item.item_name,
+        score: parseFloat(item.score) || 0,
+        category: item.category || null
+    }));
+    
+    console.log(`Initialized dynamic draft with ${itemsArrayWithScores.length} items, ${positions.length} rounds`);
+    
     return {
         players: players.map(p => ({ id: p.id, name: p.name })),
-        availableItems: items.map(i => i.item_name),
-        itemsWithScores: items.reduce((acc, item) => {
-            acc[item.item_name] = item.score;
-            return acc;
-        }, {}),
+        availableItems: itemsArrayWithScores.map(i => i.item_name),  // Array of strings
+        itemsWithScores: itemsArrayWithScores,  // Array of objects with scores
         playersItems: players.map(() => []),
         draftOrder: draftOrder,
         currentPickIndex: 0,
@@ -651,12 +657,14 @@ io.on('connection', (socket) => {
         
         const actualItemName = draft.availableItems[itemIndex];
         
-        // Get score from itemsWithScores
+        // Get score - handle both array and object formats
         let baseScore = 0;
         if (Array.isArray(draft.itemsWithScores)) {
+            // Array format (used by both simple and fixed dynamic)
             const scoreItem = draft.itemsWithScores.find(i => i.item_name === actualItemName);
             baseScore = scoreItem ? parseFloat(scoreItem.score) : 0;
         } else if (draft.itemsWithScores && typeof draft.itemsWithScores === 'object') {
+            // Object mapping format
             baseScore = draft.itemsWithScores[actualItemName] || 0;
         }
         
