@@ -295,12 +295,36 @@ async function loadDraftPositions(tableName) {
 
 function generateDraftOrder(numPlayers, numRounds, draftType) {
     const order = [];
-    for (let round = 1; round <= numRounds; round++) {
-        if (draftType === 'snake' && round % 2 === 0) {
-            for (let i = numPlayers - 1; i >= 0; i--) {
-                order.push({ playerIndex: i, round: round });
+    
+    if (draftType === 'random') {
+        // Create array of player indices
+        const playerIndices = Array.from({ length: numPlayers }, (_, i) => i);
+        // Random order each round
+        for (let round = 1; round <= numRounds; round++) {
+            const shuffled = [...playerIndices];
+            for (let i = shuffled.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
             }
-        } else {
+            for (let i = 0; i < numPlayers; i++) {
+                order.push({ playerIndex: shuffled[i], round: round });
+            }
+        }
+    } else if (draftType === 'snake') {
+        for (let round = 1; round <= numRounds; round++) {
+            if (round % 2 === 0) {
+                for (let i = numPlayers - 1; i >= 0; i--) {
+                    order.push({ playerIndex: i, round: round });
+                }
+            } else {
+                for (let i = 0; i < numPlayers; i++) {
+                    order.push({ playerIndex: i, round: round });
+                }
+            }
+        }
+    } else {
+        // Regular order (sequential)
+        for (let round = 1; round <= numRounds; round++) {
             for (let i = 0; i < numPlayers; i++) {
                 order.push({ playerIndex: i, round: round });
             }
@@ -466,7 +490,6 @@ io.on('connection', (socket) => {
         io.to(roomCode).emit('playerCount', gameRoom.players.length);
     });
 
-    // NEW: Check game mode for guests joining
     socket.on('checkGameMode', (data, callback) => {
         const { roomCode } = data;
         console.log(`🔍 Checking game mode for room: ${roomCode}`);
