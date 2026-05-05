@@ -297,9 +297,8 @@ function generateDraftOrder(numPlayers, numRounds, draftType) {
     const order = [];
     
     if (draftType === 'random') {
-        // Create array of player indices
-        const playerIndices = Array.from({ length: numPlayers }, (_, i) => i);
         // Random order each round
+        const playerIndices = Array.from({ length: numPlayers }, (_, i) => i);
         for (let round = 1; round <= numRounds; round++) {
             const shuffled = [...playerIndices];
             for (let i = shuffled.length - 1; i > 0; i--) {
@@ -333,17 +332,34 @@ function generateDraftOrder(numPlayers, numRounds, draftType) {
     return order;
 }
 
+function generateRandomPlayerOrder(numPlayers) {
+    const order = Array.from({ length: numPlayers }, (_, i) => i);
+    for (let i = order.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [order[i], order[j]] = [order[j], order[i]];
+    }
+    return order;
+}
+
 function initializeDraftState(players, config, items) {
+    const randomPlayerOrder = generateRandomPlayerOrder(players.length);
+    
+    // Reorder players based on random order for display
+    const orderedPlayers = randomPlayerOrder.map(idx => players[idx]);
+    const orderedPlayersItems = randomPlayerOrder.map(() => []);
+    
     const draftOrder = generateDraftOrder(players.length, config.numRounds, config.draftType);
     
     return {
-        players: players.map(p => ({ id: p.id, name: p.name })),
+        players: orderedPlayers.map(p => ({ id: p.id, name: p.name })),
+        originalPlayers: players.map(p => ({ id: p.id, name: p.name })),
+        randomPlayerOrder: randomPlayerOrder,
         availableItems: items.map(i => i.item_name),
         itemsWithScores: items.map(i => ({ item_name: i.item_name, score: parseFloat(i.score) || 0 })),
-        playersItems: players.map(() => []),
+        playersItems: orderedPlayersItems,
         draftOrder: draftOrder,
         currentPickIndex: 0,
-        currentPlayer: players[draftOrder[0].playerIndex],
+        currentPlayer: orderedPlayers[draftOrder[0].playerIndex],
         numRounds: config.numRounds,
         timerSeconds: config.timerMinutes * 60,
         category: config.category,
@@ -356,6 +372,11 @@ function initializeDraftState(players, config, items) {
 function initializeDynamicDraftState(players, config, items, positions) {
     const numRounds = positions.length;
     const draftOrder = generateDraftOrder(players.length, numRounds, config.draftType);
+    const randomPlayerOrder = generateRandomPlayerOrder(players.length);
+    
+    // Reorder players based on random order for display
+    const orderedPlayers = randomPlayerOrder.map(idx => players[idx]);
+    const orderedPlayersItems = randomPlayerOrder.map(() => []);
     
     const itemsArrayWithScores = items.map(item => ({
         item_name: item.item_name,
@@ -366,13 +387,15 @@ function initializeDynamicDraftState(players, config, items, positions) {
     console.log(`Initialized dynamic draft with ${itemsArrayWithScores.length} items, ${positions.length} rounds`);
     
     return {
-        players: players.map(p => ({ id: p.id, name: p.name })),
+        players: orderedPlayers.map(p => ({ id: p.id, name: p.name })),
+        originalPlayers: players.map(p => ({ id: p.id, name: p.name })),
+        randomPlayerOrder: randomPlayerOrder,
         availableItems: itemsArrayWithScores.map(i => i.item_name),
         itemsWithScores: itemsArrayWithScores,
-        playersItems: players.map(() => []),
+        playersItems: orderedPlayersItems,
         draftOrder: draftOrder,
         currentPickIndex: 0,
-        currentPlayer: players[draftOrder[0].playerIndex],
+        currentPlayer: orderedPlayers[draftOrder[0].playerIndex],
         numRounds: numRounds,
         timerSeconds: config.timerMinutes * 60,
         categoryName: config.templateDisplayName,
@@ -674,6 +697,7 @@ io.on('connection', (socket) => {
             return;
         }
         
+        // Get the current player from the ordered players list
         const currentPlayer = draft.players[currentPick.playerIndex];
         
         if (currentPlayer.id !== socket.id) {
