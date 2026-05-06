@@ -342,6 +342,11 @@ function generateSnakeDraftOrder(numPlayers, numRounds) {
 function initializeDraftState(players, config, items) {
     const randomPlayerOrder = generateRandomPlayerOrder(players.length);
     
+    console.log('=== RANDOM PLAYER ORDER ===');
+    console.log('Original players:', players.map(p => p.name));
+    console.log('Random order indices:', randomPlayerOrder);
+    console.log('Display order:', randomPlayerOrder.map(idx => players[idx].name));
+    
     // Reorder players based on random order for display
     const orderedPlayers = randomPlayerOrder.map(idx => players[idx]);
     const orderedPlayersItems = randomPlayerOrder.map(() => []);
@@ -354,7 +359,6 @@ function initializeDraftState(players, config, items) {
     if (config.draftType === 'snake') {
         draftOrder = generateSnakeDraftOrder(numPlayers, numRounds);
     } else if (config.draftType === 'random') {
-        // Random order each round
         let pickNumber = 1;
         for (let round = 1; round <= numRounds; round++) {
             const shuffled = Array.from({ length: numPlayers }, (_, i) => i);
@@ -371,7 +375,6 @@ function initializeDraftState(players, config, items) {
             }
         }
     } else {
-        // Regular sequential order
         let pickNumber = 1;
         for (let round = 1; round <= numRounds; round++) {
             for (let i = 0; i < numPlayers; i++) {
@@ -384,13 +387,11 @@ function initializeDraftState(players, config, items) {
         }
     }
     
-    // Log the draft order for debugging
-    console.log(`=== DRAFT ORDER (${config.draftType}) ===`);
-    console.log(`Players in display order: ${orderedPlayers.map(p => p.name).join(', ')}`);
-    draftOrder.forEach(pick => {
-        console.log(`Pick ${pick.pickNumber}: Round ${pick.round}, Player: ${orderedPlayers[pick.playerIndex]?.name} (Index ${pick.playerIndex})`);
-    });
-    console.log('================================');
+    console.log('=== WHO PICKS FIRST? ===');
+    console.log('First pick goes to display index:', draftOrder[0].playerIndex);
+    console.log('First pick player name:', orderedPlayers[draftOrder[0].playerIndex]?.name);
+    console.log('Host name:', players[0]?.name);
+    console.log('========================');
     
     return {
         players: orderedPlayers.map(p => ({ id: p.id, name: p.name })),
@@ -414,6 +415,11 @@ function initializeDraftState(players, config, items) {
 function initializeDynamicDraftState(players, config, items, positions) {
     const numRounds = positions.length;
     const randomPlayerOrder = generateRandomPlayerOrder(players.length);
+    
+    console.log('=== DYNAMIC RANDOM PLAYER ORDER ===');
+    console.log('Original players:', players.map(p => p.name));
+    console.log('Random order indices:', randomPlayerOrder);
+    console.log('Display order:', randomPlayerOrder.map(idx => players[idx].name));
     
     // Reorder players based on random order for display
     const orderedPlayers = randomPlayerOrder.map(idx => players[idx]);
@@ -460,15 +466,13 @@ function initializeDynamicDraftState(players, config, items, positions) {
         }
     }
     
-    console.log(`Initialized dynamic draft with ${itemsArrayWithScores.length} items, ${positions.length} rounds`);
+    console.log('=== DYNAMIC WHO PICKS FIRST? ===');
+    console.log('First pick goes to display index:', draftOrder[0].playerIndex);
+    console.log('First pick player name:', orderedPlayers[draftOrder[0].playerIndex]?.name);
+    console.log('Host name:', players[0]?.name);
+    console.log('================================');
     
-    // Log the draft order for debugging
-    console.log(`=== DYNAMIC DRAFT ORDER (${config.draftType}) ===`);
-    console.log(`Players in display order: ${orderedPlayers.map(p => p.name).join(', ')}`);
-    draftOrder.forEach(pick => {
-        console.log(`Pick ${pick.pickNumber}: Round ${pick.round}, Player: ${orderedPlayers[pick.playerIndex]?.name} (Index ${pick.playerIndex})`);
-    });
-    console.log('============================================');
+    console.log(`Initialized dynamic draft with ${itemsArrayWithScores.length} items, ${positions.length} rounds`);
     
     return {
         players: orderedPlayers.map(p => ({ id: p.id, name: p.name })),
