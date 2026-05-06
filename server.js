@@ -306,28 +306,36 @@ function generateSnakeDraftOrder(numPlayers, numRounds) {
     const draftOrder = [];
     let pickNumber = 1;
     
+    console.log(`=== GENERATING SNAKE DRAFT ORDER ===`);
+    console.log(`Players: ${numPlayers}, Rounds: ${numRounds}`);
+    
     for (let round = 1; round <= numRounds; round++) {
         if (round % 2 === 1) {
-            // Odd rounds: ascending order (player 0,1,2,3...)
+            // Odd rounds: ascending order (0,1,2,3...)
+            console.log(`Round ${round} (ODD): Ascending order`);
             for (let i = 0; i < numPlayers; i++) {
                 draftOrder.push({
                     playerIndex: i,
                     round: round,
                     pickNumber: pickNumber++
                 });
+                console.log(`  Pick ${pickNumber-1}: Player Index ${i}`);
             }
         } else {
-            // Even rounds: descending order (player 3,2,1,0...)
+            // Even rounds: descending order (numPlayers-1, numPlayers-2, ..., 0)
+            console.log(`Round ${round} (EVEN): Descending order`);
             for (let i = numPlayers - 1; i >= 0; i--) {
                 draftOrder.push({
                     playerIndex: i,
                     round: round,
                     pickNumber: pickNumber++
                 });
+                console.log(`  Pick ${pickNumber-1}: Player Index ${i}`);
             }
         }
     }
     
+    console.log(`=== TOTAL PICKS: ${draftOrder.length} ===`);
     return draftOrder;
 }
 
