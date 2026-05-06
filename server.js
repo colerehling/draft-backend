@@ -302,6 +302,35 @@ function generateRandomPlayerOrder(numPlayers) {
     return order;
 }
 
+function generateSnakeDraftOrder(numPlayers, numRounds) {
+    const draftOrder = [];
+    let pickNumber = 1;
+    
+    for (let round = 1; round <= numRounds; round++) {
+        if (round % 2 === 1) {
+            // Odd rounds: ascending order (player 0,1,2,3...)
+            for (let i = 0; i < numPlayers; i++) {
+                draftOrder.push({
+                    playerIndex: i,
+                    round: round,
+                    pickNumber: pickNumber++
+                });
+            }
+        } else {
+            // Even rounds: descending order (player 3,2,1,0...)
+            for (let i = numPlayers - 1; i >= 0; i--) {
+                draftOrder.push({
+                    playerIndex: i,
+                    round: round,
+                    pickNumber: pickNumber++
+                });
+            }
+        }
+    }
+    
+    return draftOrder;
+}
+
 function initializeDraftState(players, config, items) {
     const randomPlayerOrder = generateRandomPlayerOrder(players.length);
     
@@ -309,50 +338,51 @@ function initializeDraftState(players, config, items) {
     const orderedPlayers = randomPlayerOrder.map(idx => players[idx]);
     const orderedPlayersItems = randomPlayerOrder.map(() => []);
     
-    // Generate correct snake draft order based on displayed player order
+    // Generate the draft order based on the type
     let draftOrder = [];
-    const numRounds = config.numRounds;
     const numPlayers = players.length;
+    const numRounds = config.numRounds;
     
     if (config.draftType === 'snake') {
-        for (let round = 1; round <= numRounds; round++) {
-            if (round % 2 === 1) {
-                // Odd rounds: ascending order (0,1,2...)
-                for (let i = 0; i < numPlayers; i++) {
-                    draftOrder.push({ playerIndex: i, round: round, pickNumber: draftOrder.length + 1 });
-                }
-            } else {
-                // Even rounds: descending order (2,1,0...)
-                for (let i = numPlayers - 1; i >= 0; i--) {
-                    draftOrder.push({ playerIndex: i, round: round, pickNumber: draftOrder.length + 1 });
-                }
-            }
-        }
+        draftOrder = generateSnakeDraftOrder(numPlayers, numRounds);
     } else if (config.draftType === 'random') {
-        const displayIndices = Array.from({ length: numPlayers }, (_, i) => i);
+        // Random order each round
+        let pickNumber = 1;
         for (let round = 1; round <= numRounds; round++) {
-            const shuffled = [...displayIndices];
+            const shuffled = Array.from({ length: numPlayers }, (_, i) => i);
             for (let i = shuffled.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
             }
             for (let i = 0; i < numPlayers; i++) {
-                draftOrder.push({ playerIndex: shuffled[i], round: round, pickNumber: draftOrder.length + 1 });
+                draftOrder.push({
+                    playerIndex: shuffled[i],
+                    round: round,
+                    pickNumber: pickNumber++
+                });
             }
         }
     } else {
+        // Regular sequential order
+        let pickNumber = 1;
         for (let round = 1; round <= numRounds; round++) {
             for (let i = 0; i < numPlayers; i++) {
-                draftOrder.push({ playerIndex: i, round: round, pickNumber: draftOrder.length + 1 });
+                draftOrder.push({
+                    playerIndex: i,
+                    round: round,
+                    pickNumber: pickNumber++
+                });
             }
         }
     }
     
     // Log the draft order for debugging
-    console.log('Draft order generated:');
+    console.log(`=== DRAFT ORDER (${config.draftType}) ===`);
+    console.log(`Players in display order: ${orderedPlayers.map(p => p.name).join(', ')}`);
     draftOrder.forEach(pick => {
-        console.log(`Round ${pick.round}, Pick ${pick.pickNumber}: Player Index ${pick.playerIndex} (${orderedPlayers[pick.playerIndex]?.name})`);
+        console.log(`Pick ${pick.pickNumber}: Round ${pick.round}, Player: ${orderedPlayers[pick.playerIndex]?.name} (Index ${pick.playerIndex})`);
     });
+    console.log('================================');
     
     return {
         players: orderedPlayers.map(p => ({ id: p.id, name: p.name })),
@@ -387,40 +417,37 @@ function initializeDynamicDraftState(players, config, items, positions) {
         category: item.category || null
     }));
     
-    // Generate correct snake draft order based on displayed player order
+    // Generate the draft order based on the type
     let draftOrder = [];
     const numPlayers = players.length;
     
     if (config.draftType === 'snake') {
-        for (let round = 1; round <= numRounds; round++) {
-            if (round % 2 === 1) {
-                // Odd rounds: ascending order (0,1,2...)
-                for (let i = 0; i < numPlayers; i++) {
-                    draftOrder.push({ playerIndex: i, round: round, pickNumber: draftOrder.length + 1 });
-                }
-            } else {
-                // Even rounds: descending order (2,1,0...)
-                for (let i = numPlayers - 1; i >= 0; i--) {
-                    draftOrder.push({ playerIndex: i, round: round, pickNumber: draftOrder.length + 1 });
-                }
-            }
-        }
+        draftOrder = generateSnakeDraftOrder(numPlayers, numRounds);
     } else if (config.draftType === 'random') {
-        const displayIndices = Array.from({ length: numPlayers }, (_, i) => i);
+        let pickNumber = 1;
         for (let round = 1; round <= numRounds; round++) {
-            const shuffled = [...displayIndices];
+            const shuffled = Array.from({ length: numPlayers }, (_, i) => i);
             for (let i = shuffled.length - 1; i > 0; i--) {
                 const j = Math.floor(Math.random() * (i + 1));
                 [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
             }
             for (let i = 0; i < numPlayers; i++) {
-                draftOrder.push({ playerIndex: shuffled[i], round: round, pickNumber: draftOrder.length + 1 });
+                draftOrder.push({
+                    playerIndex: shuffled[i],
+                    round: round,
+                    pickNumber: pickNumber++
+                });
             }
         }
     } else {
+        let pickNumber = 1;
         for (let round = 1; round <= numRounds; round++) {
             for (let i = 0; i < numPlayers; i++) {
-                draftOrder.push({ playerIndex: i, round: round, pickNumber: draftOrder.length + 1 });
+                draftOrder.push({
+                    playerIndex: i,
+                    round: round,
+                    pickNumber: pickNumber++
+                });
             }
         }
     }
@@ -428,10 +455,12 @@ function initializeDynamicDraftState(players, config, items, positions) {
     console.log(`Initialized dynamic draft with ${itemsArrayWithScores.length} items, ${positions.length} rounds`);
     
     // Log the draft order for debugging
-    console.log('Dynamic draft order generated:');
+    console.log(`=== DYNAMIC DRAFT ORDER (${config.draftType}) ===`);
+    console.log(`Players in display order: ${orderedPlayers.map(p => p.name).join(', ')}`);
     draftOrder.forEach(pick => {
-        console.log(`Round ${pick.round}, Pick ${pick.pickNumber}: Player Index ${pick.playerIndex} (${orderedPlayers[pick.playerIndex]?.name})`);
+        console.log(`Pick ${pick.pickNumber}: Round ${pick.round}, Player: ${orderedPlayers[pick.playerIndex]?.name} (Index ${pick.playerIndex})`);
     });
+    console.log('============================================');
     
     return {
         players: orderedPlayers.map(p => ({ id: p.id, name: p.name })),
